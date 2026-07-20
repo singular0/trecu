@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trecu"
+version = "0.1.0"
+description = "TUI to read and decode ECU fault codes from Triumph motorcycles over a KKL (FT232RL) K-line cable"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LGPL-3.0-or-later"
+authors = [{ name = "Denis Yantarev", email = "denis.yantarev@gmail.com" }]
+keywords = ["triumph", "motorcycle", "ecu", "kwp2000", "obd", "kkl", "ftdi", "diagnostics"]
+
+# Kept intentionally small and to well-maintained libraries only.
+dependencies = [
+    "textual>=0.60",   # modern async TUI framework
+    "pyserial>=3.5",   # serial access to the FT232RL virtual COM port
+    "rich>=13.0",      # pulled in by textual; used directly for formatting too
+]
+
+[project.optional-dependencies]
+# Direct FTDI/libusb access (bit-bang init) as an alternative to the VCP driver.
+ftdi = ["pyftdi>=0.55"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+trecu = "trecu.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["trecu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
