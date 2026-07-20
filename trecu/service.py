@@ -8,8 +8,10 @@ Supports two protocol paths and an ``auto`` mode that tries them in order:
 
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from .protocol.dtc import Dtc, DtcDatabase
 from .protocol.iso9141 import Iso9141Client, Iso9141Config
@@ -29,6 +31,48 @@ PROTOCOL_KWP_FAST = "kwp-fast"
 PROTOCOL_AUTO = "auto"
 # Order tried in auto mode: ISO 9141 first (the confirmed Triumph path).
 _AUTO_ORDER = (PROTOCOL_ISO9141, PROTOCOL_KWP_FAST)
+
+# Keepalive cadence for a persistent session. Both protocols' idle timeout
+# (KWP2000 P3max, ISO 9141-2) is ~5 s, so beat comfortably under that.
+DEFAULT_KEEPALIVE_INTERVAL = 2.0
+
+
+class _Keepalive:
+    """Background ticker that beats the ECU on an interval to hold a session.
+
+    Each beat runs the supplied ``beat`` callable, which the service wraps in
+    its I/O lock — so a keepalive never overlaps a real read/clear on the
+    half-duplex K-line. Beats are best-effort: a failure is logged and the loop
+    keeps ticking; the next real operation surfaces a hard error.
+    """
+
+    def __init__(self, beat: Callable[[], None], interval: float, logger: Logger):
+        self._beat = beat
+        self._interval = interval
+        self._log = logger
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="trecu-keepalive", daemon=True
+        )
+        self.beats = 0
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Event.wait doubles as the sleep and the stop signal: it returns True
+        # the instant stop() is called, so join() below is near-immediate.
+        while not self._stop.wait(self._interval):
+            try:
+                self._beat()
+                self.beats += 1
+            except Exception as exc:  # noqa: BLE001 - keepalive is best-effort
+                self._log(f"keepalive failed: {exc}")
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
 
 @dataclass
@@ -66,12 +110,17 @@ class DiagnosticService:
         self._active_info: Optional[ConnectionInfo] = None
         self._active_proto = ""
         self._ecu_info: Optional[EcuInfo] = None  # cached for the session
+        # Serializes every exchange on the half-duplex K-line: real operations
+        # and the keepalive ticker all take this before touching the wire.
+        self._io_lock = threading.Lock()
+        self._keepalive: Optional[_Keepalive] = None
 
     # -- lifecycle -----------------------------------------------------------
     def open(self) -> None:
         self.transport.open()
 
     def close(self) -> None:
+        self._stop_keepalive()
         try:
             if self._active is not None:
                 self._active.stop_communication()
@@ -79,6 +128,66 @@ class DiagnosticService:
             pass
         finally:
             self.transport.close()
+
+    # -- persistent session (F1) --------------------------------------------
+    def start_session(
+        self, keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL
+    ) -> "DiagnosticService":
+        """Open the transport, connect once, and start the keepalive ticker.
+
+        This is the persistent-session lifecycle: unlike a one-shot ``open()``
+        + ``read_faults()``, the connection is established up front and held
+        open, with a background ticker sending ``TesterPresent`` (KWP) / a cheap
+        OBD poke (ISO 9141) every ``keepalive_interval`` seconds so the ECU
+        doesn't drop the session while idle. Pass ``0`` to disable the ticker
+        (e.g. one-shot use). Pair with :meth:`close`, or use :meth:`session`.
+        """
+        self.open()
+        try:
+            self._connect()
+        except Exception:
+            self.close()
+            raise
+        self._start_keepalive(keepalive_interval)
+        return self
+
+    @contextmanager
+    def session(
+        self, keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL
+    ) -> Iterator["DiagnosticService"]:
+        """Context manager wrapping :meth:`start_session` + :meth:`close`.
+
+        Yields the service; call ``read_faults`` / ``clear_faults`` /
+        ``read_identification`` on it as usual — the connection persists and
+        the keepalive ticker runs for the life of the ``with`` block.
+        """
+        self.start_session(keepalive_interval)
+        try:
+            yield self
+        finally:
+            self.close()
+
+    def _start_keepalive(self, interval: float) -> None:
+        if not interval or interval <= 0:
+            self._keepalive = None
+            return
+        self._keepalive = _Keepalive(self._keepalive_beat, interval, self._logger)
+        self._keepalive.start()
+
+    def _stop_keepalive(self) -> None:
+        ka, self._keepalive = self._keepalive, None
+        if ka is not None:
+            ka.stop()
+
+    def _keepalive_beat(self) -> None:
+        """One keepalive exchange, serialized against real operations."""
+        with self._io_lock:
+            client = self._active
+            if client is None:
+                return
+            fn = getattr(client, "keepalive", None)
+            if fn is not None:
+                fn()
 
     # -- client construction / connect --------------------------------------
     def _candidate_protocols(self) -> List[str]:
@@ -118,23 +227,29 @@ class DiagnosticService:
         raise ProtocolError("could not connect: " + "; ".join(errors))
 
     # -- operations ----------------------------------------------------------
+    # Public operations take ``_io_lock`` so they can't interleave with the
+    # keepalive ticker (or each other) on the single-wire K-line. Private
+    # helpers (_connect, _read_identification) run under that held lock and must
+    # not re-acquire it.
     def read_faults(self) -> ReadResult:
-        client = self._connect()
-        ecu_info = self._read_identification(client)
-        triples = client.read_dtcs()
-        dtcs = self.db.decode_all(triples)
-        info = self._active_info
-        return ReadResult(
-            key_bytes=info.key_bytes if info else b"",
-            dtcs=dtcs,
-            session_started=info.session_started if info else False,
-            protocol=self._active_proto,
-            ecu_info=ecu_info if ecu_info and not ecu_info.is_empty else None,
-        )
+        with self._io_lock:
+            client = self._connect()
+            ecu_info = self._read_identification(client)
+            triples = client.read_dtcs()
+            dtcs = self.db.decode_all(triples)
+            info = self._active_info
+            return ReadResult(
+                key_bytes=info.key_bytes if info else b"",
+                dtcs=dtcs,
+                session_started=info.session_started if info else False,
+                protocol=self._active_proto,
+                ecu_info=ecu_info if ecu_info and not ecu_info.is_empty else None,
+            )
 
     def read_identification(self) -> Optional[EcuInfo]:
         """Read (and cache) ECU identity for the active session."""
-        return self._read_identification(self._connect())
+        with self._io_lock:
+            return self._read_identification(self._connect())
 
     def _read_identification(self, client) -> Optional[EcuInfo]:
         """Best-effort identity read, cached so re-reads don't re-query the ECU."""
@@ -151,8 +266,9 @@ class DiagnosticService:
         return self._ecu_info
 
     def clear_faults(self) -> None:
-        client = self._connect()
-        client.clear_dtcs()
+        with self._io_lock:
+            client = self._connect()
+            client.clear_dtcs()
 
     def __enter__(self) -> "DiagnosticService":
         self.open()

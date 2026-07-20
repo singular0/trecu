@@ -43,7 +43,10 @@ Transport (transport/base.py)    ← half-duplex byte pipe: serial or mock
 
 **The two protocol clients are duck-typed peers, not a class hierarchy.** Both
 expose `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
-`read_identification() -> EcuInfo`, `clear_dtcs()`, and `stop_communication()`.
+`read_identification() -> EcuInfo`, `clear_dtcs()`, `keepalive()`, and
+`stop_communication()`. `keepalive()` holds a persistent session open (F1):
+KWP sends `TesterPresent` (0x3E, response suppressed), iso9141 has no such
+service so it pokes the link with a cheap read-only Mode 01 PID 00.
 `read_identification()` is best-effort (OBD Mode 09 / KWP ReadEcuIdentification
 0x1A) — a missing reply yields empty fields, not an error. `iso9141.py` imports
 the *shared* types (`ConnectionInfo`, `EcuInfo`, `Logger`, `ProtocolError`,
@@ -57,6 +60,17 @@ building a fresh client per attempt and keeping the first that `connect()`s.
 `iso9141` is first because it's the confirmed real-Triumph path (5-baud slow
 init + OBD-II). A caller can also inject a pre-built `client=` to bypass
 selection entirely (used by tests).
+
+**Two lifecycle modes.** One-shot (`with service:` → `open`/`close`) still
+connects lazily on the first operation — that's the CLI's `--read`/`--clear`
+path. **Persistent (F1)** is `service.session()` (a context manager) or
+`start_session()`: it connects *up front* and runs a background keepalive
+ticker (`_Keepalive`, a daemon thread) sending `client.keepalive()` every
+`DEFAULT_KEEPALIVE_INTERVAL` (2 s) so the ECU doesn't drop the session while
+idle — pass `keepalive_interval=0` to disable it. Because the K-line is
+half-duplex, every operation *and* every keepalive beat runs under one
+`_io_lock`, so a beat can never interleave with a read/clear. This is the seam
+that Phase 3 live-polling / Phase 5 actuator tests build on.
 
 **Transports advertise capabilities via class flags**, and the protocol layer
 branches on them rather than on concrete types:
@@ -94,10 +108,13 @@ state), and **Log** (the raw protocol `RichLog`; error lines are red, and the
 app auto-switches here under `-v` and on error). Footer bindings are *contextual*
 via `check_action`: `r` Read shows on Dashboard/Faults, `c` Clear on Faults only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
-own arrow bindings are hidden). **The "session" is framing, not yet mechanism:**
-Read/Clear still build a fresh `DiagnosticService` per keypress and tear it down
-(`_blocking_read`/`_blocking_clear`) — the persistent-session + keepalive model
-sketched in `docs/tui-redesign.md` (roadmap F1) is not built.
+own arrow bindings are hidden). **The session is now mechanism, not just framing
+(roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
+lazily on the first read (`_ensure_session`), connected once and held open with
+a background keepalive ticker; re-reads and clears reuse it instead of
+re-initialising the K-line per keypress. A failed operation tears the session
+down (`_close_session`) so the next read reconnects cleanly; `on_unmount` closes
+it on exit. The spine shows a green `⚡` keepalive lamp while a session is live.
 
 **TUI threading:** Textual is async but the protocol stack is blocking. The app
 runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the

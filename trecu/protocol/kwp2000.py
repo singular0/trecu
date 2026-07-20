@@ -285,6 +285,15 @@ class Kwp2000Client:
         if response_required:
             self._read_response_frame(self.config.p2_timeout)
 
+    def keepalive(self) -> None:
+        """Keep the session alive between operations (TesterPresent, no reply).
+
+        Duck-typed peer of :meth:`Iso9141Client.keepalive`; called on an
+        interval by :class:`~trecu.service.DiagnosticService` so the ECU doesn't
+        time the KWP2000 session out (P3max) while idle.
+        """
+        self.tester_present(response_required=False)
+
     def connect(self) -> ConnectionInfo:
         """Full connect sequence: fast-init + StartCommunication + session."""
         key_bytes = self.start_communication()

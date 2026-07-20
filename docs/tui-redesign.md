@@ -1,12 +1,13 @@
 # TUI: the tabbed session shell, and where it's headed
 
-Status: the **tabbed session *shell* is built** (`tui/app.py`); the persistent-
-session backend and the live-data / actuator views it's shaped for are still
-ahead. This doc records both — what ships today, and the direction that shaped
-it. It is the UI side of roadmap **F1** (persistent session + `TesterPresent`
-keepalive) and the front end for **Phase 3** (live sensor streaming) and
-**Phase 4** (throttle sync). See `ROADMAP.md` for the layer plan and `CLAUDE.md`
-for the four architectural seams.
+Status: the **tabbed session *shell* is built** (`tui/app.py`) and so is the
+**persistent-session backend** (roadmap F1 — the app now holds one long-lived
+connection with a keepalive ticker; see below). The live-data / actuator views
+the shell is shaped for are still ahead. This doc records both — what ships
+today, and the direction that shaped it. It is the UI side of roadmap **F1**
+(persistent session + `TesterPresent` keepalive) and the front end for **Phase
+3** (live sensor streaming) and **Phase 4** (throttle sync). See `ROADMAP.md`
+for the layer plan and `CLAUDE.md` for the four architectural seams.
 
 ## The core reframe (the direction)
 
@@ -18,10 +19,9 @@ for anything continuous. The re-think, in one sentence:
 > one *view* over it — not the app itself.**
 
 The tabbed shell below is the *visual* half of that reframe. The other half —
-one long-lived session with keepalive, replacing connect-per-action — is
-roadmap F1 and **is not built yet** (see "What's still connect-per-action").
-Until F1 lands, the "session" is framing; the poll loop and live views that
-make it literally true come after it.
+one long-lived session with keepalive, replacing connect-per-action — is roadmap
+F1 and **is now built** (see "The persistent session (F1)"). What's still ahead
+is the poll loop and live views that make the session *visibly* continuous.
 
 ## The organizing constraint
 
@@ -32,11 +32,12 @@ UI's mental model:
 
 > **The active view *is* what the ECU session is doing right now.**
 
-Today each Read is a discrete connect→read→teardown cycle, so this is only
-aspirational. Once the poll loop exists (F1/Phase 3), switching to **Live Data**
-streams PIDs; switching to **Faults** pauses the stream, reads DTCs, then idles
-on keepalive; **Actuators** (later) commands outputs. One wire, one activity,
-mirrored by one visible tab — switching views *retasks the ECU*.
+The session is now held open on keepalive between operations (F1), but the
+*views* don't yet retask it continuously — that's the poll loop (Phase 3). Once
+it exists, switching to **Live Data** streams PIDs; switching to **Faults**
+pauses the stream, reads DTCs, then idles on keepalive; **Actuators** (later)
+commands outputs. One wire, one activity, mirrored by one visible tab —
+switching views *retasks the ECU*.
 
 ## What's built today
 
@@ -46,10 +47,10 @@ mirrored by one visible tab — switching views *retasks the ECU*.
   right-aligned, a colored liveness dot + state label driven by `_SPINE`
   (`ready` / `connecting` / `reading` / `clearing` / `connected` / `error`),
   preceded by a **synthetic MIL lamp** — a red dot shown only when the last read
-  reported stored faults. This is deliberately *thinner* than the originally
-  proposed spine: protocol / port / ECU identity live in the Dashboard cards,
-  and there is no keepalive/poll-rate indicator yet (nothing to indicate — no
-  poll loop).
+  reported stored faults, and (F1) a green **`⚡` keepalive lamp** while a
+  long-lived session is held open. This is deliberately *thinner* than the
+  originally proposed spine: protocol / port / ECU identity live in the
+  Dashboard cards, and there is no poll-rate indicator yet (no poll loop).
 - **`TabbedContent` body** — three tabs: **Dashboard**, **Faults**, **Log**.
   `←` / `→` move between them, shown in the footer as *Prev tab* / *Next tab*.
   These are app-level `priority=True` bindings: `TabbedContent` already binds
@@ -102,16 +103,26 @@ Log — timestamped protocol trace (errors in red), auto-shown under `-v`/on err
 │ ← Prev tab   → Next tab   q Quit                                      │
 ```
 
-### What's still connect-per-action
+### The persistent session (F1) — now built
 
-The caveat that keeps the reframe honest: `action_read` and `_run_clear` still
-build a **fresh `DiagnosticService` per keypress**, connect, act, and tear down
-(`_blocking_read` / `_blocking_clear`, each `with self._make_service() as svc`).
-There is no long-lived worker, no keepalive, no `set_interval` poll loop, and no
-reactive streaming. Reads run in `asyncio.to_thread` inside an `exclusive`
-`@work(group="ecu")` so a Read and a Clear can't overlap on the one wire — but
-that is one-shot exclusion, not a persistent session. **F1 is what turns the
-spine's "session" from framing into mechanism.**
+The session is now mechanism, not framing. `action_read` / `_run_clear` no
+longer build a fresh service per keypress: the app owns **one long-lived
+`DiagnosticService`**, built lazily on the first read (`_ensure_session`),
+connected once and held open by a background keepalive ticker. Re-reads and
+clears reuse it (`_session_read` / `_session_clear`) rather than re-initialising
+the K-line. A failed operation tears the session down (`_close_session`) so the
+next read reconnects cleanly; `on_unmount` closes it on exit. The spine grows a
+green **`⚡` keepalive lamp** while a session is live — the first honest
+indicator of the "session is doing something" model.
+
+Reads still run in `asyncio.to_thread` inside an `exclusive` `@work(group="ecu")`
+so a Read and a Clear can't overlap; the half-duplex constraint is *also* now
+enforced one layer down, in `DiagnosticService._io_lock`, which serializes every
+operation and every keepalive beat on the single wire.
+
+**Still ahead (Phase 3):** the `set_interval` poll loop and reactive streaming
+that make the *active view retasks the ECU* model literally true. F1 is the
+lifecycle those sit on; the poll loop replaces the one-shot `@work` reader.
 
 ## Planned views (not built)
 

@@ -23,9 +23,13 @@ Built and tested (31 tests, all against the mock ECUs):
   in `--read` output, and in the TUI status bar + log.
 - **CLI** (`--read`, `--clear`, `--list-ports`, `--mock`) and **Textual TUI**
   (read / clear / port picker).
+- **Persistent session + keepalive** (`DiagnosticService.session()`, a
+  `TesterPresent` ticker, half-duplex I/O lock; the TUI owns one long-lived
+  session) — the F1 foundation for everything continuous.
 - **Two mock ECUs**, one per protocol path, as the ground truth for tests.
 
-So **Phase 1 is done** and **Phase 2 is done**.
+So **Phase 1 is done**, **Phase 2 is done**, and the **F1 foundation is done**
+(Phase 3 live-data streaming is now unblocked).
 
 ---
 
@@ -34,16 +38,27 @@ So **Phase 1 is done** and **Phase 2 is done**.
 These are not user features but they gate almost everything past Phase 2. Doing
 them deliberately, early, avoids reworking each later phase.
 
-### F1 — Persistent session + `TesterPresent` keepalive  · **M** · unlocks 3–7
-Today every operation calls `service._connect()` on a **fresh client** and tears
-it down (`cli.py` builds a new `DiagnosticService` per command; the TUI does the
-same per `action_read`). That's correct for one-shot DTC reads but wrong for
-anything continuous: live data, actuator tests, and map transfer all need the
-session held open, with `TesterPresent` (KWP `0x3E`, already implemented but
-unused) sent on an interval so the ECU doesn't time out. Work: a
-`DiagnosticService.session()` context that connects once and keeps the client
-alive; a keepalive ticker; and a TUI worker model that owns a long-lived session
-instead of connect-per-action.
+### F1 — Persistent session + `TesterPresent` keepalive  · **M** · unlocks 3–7 · **done**
+Delivered:
+
+- **`DiagnosticService.session()`** (context manager) + **`start_session()`** —
+  connect once, hold the client open, and run a keepalive ticker for the life of
+  the session. `keepalive_interval=0` disables the ticker (one-shot use).
+- **Keepalive ticker** (`_Keepalive`, a daemon thread) beats every
+  `DEFAULT_KEEPALIVE_INTERVAL` (2 s): KWP `TesterPresent` (`0x3E`, response
+  suppressed) / iso9141 a cheap read-only Mode 01 PID 00 poke — both exposed as
+  a duck-typed `client.keepalive()`.
+- **Half-duplex serialization** — every operation and every beat runs under one
+  `DiagnosticService._io_lock`, so keepalive never interleaves with a read/clear
+  on the single-wire K-line.
+- **TUI owns one long-lived session** — built lazily on first read
+  (`_ensure_session`), reused across reads/clears, torn down on error for a
+  clean reconnect and on `on_unmount`. The spine shows a `⚡` keepalive lamp.
+- Covered by `tests/test_session.py` (lifecycle, ticker cadence, lock
+  serialization, teardown, both clients' keepalive, TUI session reuse).
+
+The CLI stays one-shot (`--read`/`--clear` use `with service:`, no keepalive);
+the persistent session is the TUI/continuous path.
 
 ### F2 — Model-value data files, not constants  · **S, incremental** · unlocks 3–7
 `data/triumph_dtc.json` is the pattern: model-specific values live in data, not
@@ -196,8 +211,8 @@ interrupted write can brick the ECU.**
 
 ## Suggested sequencing
 
-1. **Phase 1 (ECU ID)** — small, safe, proves the stack; ship next.
-2. **F1 (persistent session)** — the unlock for everything continuous.
+1. **Phase 1 (ECU ID)** — small, safe, proves the stack; ✅ done.
+2. **F1 (persistent session)** — the unlock for everything continuous; ✅ done.
 3. **Phase 3 → Phase 4** — live data, then throttle sync rides on it for cheap.
 4. **F3 + F4 spikes** (need real hardware) — resolve *before* committing to 5–7;
    they may reveal 5–7 are blocked or need a new `kwp-slow` client.

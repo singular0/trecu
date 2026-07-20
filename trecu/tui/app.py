@@ -30,7 +30,7 @@ from textual.widgets import (
 )
 
 from ..protocol.dtc import DtcDatabase
-from ..service import DiagnosticService, ReadResult
+from ..service import DEFAULT_KEEPALIVE_INTERVAL, DiagnosticService, ReadResult
 from ..transport.base import Transport
 from .port_select import PortSelectScreen
 
@@ -154,6 +154,7 @@ class TrecuApp(App):
         transport_for_port: Optional[TransportForPort] = None,
         protocol: str = "auto",
         verbose: bool = False,
+        keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
     ):
         super().__init__()
         self._transport_factory = transport_factory
@@ -162,12 +163,17 @@ class TrecuApp(App):
         self._mock = mock
         self._protocol = protocol
         self._verbose = verbose
+        self._keepalive_interval = keepalive_interval
         self._port = port or ("mock ECU" if mock else None)
         # Used only when no port is known yet and the user must choose one.
         self._list_ports = list_ports
         self._transport_for_port = transport_for_port
         self._state = "ready"
         self._last: Optional[ReadResult] = None
+        # F1: one long-lived session, connected once and held open with a
+        # keepalive ticker — reused across reads/clears instead of the old
+        # connect-per-keypress model. Built lazily on the first read.
+        self._session: Optional[DiagnosticService] = None
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -225,7 +231,9 @@ class TrecuApp(App):
         color, dot, label = _SPINE.get(self._state, _SPINE["ready"])
         # Synthetic MIL lamp: red dot only when the ECU reports stored faults.
         mil = "[red]●[/]  " if (self._last and self._last.count) else ""
-        conn = f"{mil}[{color}]{dot}[/] [b]{label}[/]"
+        # Keepalive lamp: the session is held open by a TesterPresent ticker.
+        ka = "[green]⚡[/] " if (self._session is not None and self._state == "connected") else ""
+        conn = f"{mil}{ka}[{color}]{dot}[/] [b]{label}[/]"
         self.query_one("#conn", Static).update(Text.from_markup(conn))
 
     # -- helpers -------------------------------------------------------------
@@ -284,22 +292,37 @@ class TrecuApp(App):
             return active == "tab-faults"
         return True
 
-    def _make_service(self) -> DiagnosticService:
-        return DiagnosticService(
-            self._transport_factory(),
-            self._config,
-            self._db,
-            self._logger,
-            protocol=self._protocol,
-        )
+    # -- persistent session (F1) ---------------------------------------------
+    # These run on the worker thread (via asyncio.to_thread). The session is
+    # built once on first use, then reused: a re-read or clear reuses the open
+    # connection rather than re-initialising the K-line every keypress.
+    def _ensure_session(self) -> DiagnosticService:
+        if self._session is None:
+            svc = DiagnosticService(
+                self._transport_factory(),
+                self._config,
+                self._db,
+                self._logger,
+                protocol=self._protocol,
+            )
+            svc.start_session(self._keepalive_interval)
+            self._session = svc
+        return self._session
 
-    def _blocking_read(self) -> ReadResult:
-        with self._make_service() as svc:
-            return svc.read_faults()
+    def _close_session(self) -> None:
+        """Tear the session down (stop keepalive, stop_communication, close)."""
+        svc, self._session = self._session, None
+        if svc is not None:
+            try:
+                svc.close()
+            except Exception:
+                pass
 
-    def _blocking_clear(self) -> None:
-        with self._make_service() as svc:
-            svc.clear_faults()
+    def _session_read(self) -> ReadResult:
+        return self._ensure_session().read_faults()
+
+    def _session_clear(self) -> None:
+        self._ensure_session().clear_faults()
 
     # -- rendering results ---------------------------------------------------
     def _populate(self, result: ReadResult) -> None:
@@ -382,10 +405,13 @@ class TrecuApp(App):
         if self._transport_factory is None:
             self._choose_port()
             return
-        self._set_state("connecting")
+        # A fresh connect shows "connecting…"; a re-read over the held session
+        # is just "reading…".
+        self._set_state("connecting" if self._session is None else "reading")
         try:
-            result = await asyncio.to_thread(self._blocking_read)
+            result = await asyncio.to_thread(self._session_read)
         except Exception as exc:  # transport/protocol errors surface here
+            await asyncio.to_thread(self._close_session)  # reconnect on next read
             self._on_error(exc)
             return
         self._populate(result)
@@ -404,8 +430,9 @@ class TrecuApp(App):
     async def _run_clear(self) -> None:
         self._set_state("clearing")
         try:
-            await asyncio.to_thread(self._blocking_clear)
+            await asyncio.to_thread(self._session_clear)
         except Exception as exc:
+            await asyncio.to_thread(self._close_session)  # reconnect on next read
             self._on_error(exc)
             return
         self._append_log("fault codes cleared; re-reading…")
@@ -416,3 +443,8 @@ class TrecuApp(App):
         self._set_state("error")
         self.action_show_tab("tab-log")
         self.bell()
+
+    def on_unmount(self) -> None:
+        # Close the held session on exit: stop the keepalive ticker, send
+        # stop_communication, and release the port.
+        self._close_session()

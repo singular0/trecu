@@ -161,6 +161,17 @@ class Iso9141Client:
         # ISO 9141 has no explicit stop; the session just times out.
         return None
 
+    def keepalive(self) -> None:
+        """Keep the ISO 9141-2 link alive between operations.
+
+        Duck-typed peer of :meth:`Kwp2000Client.keepalive`. OBD-II / ISO 9141-2
+        have no TesterPresent service, so poke the link with a cheap, read-only
+        Mode 01 PID 00 (supported-PIDs) request — enough traffic to avoid the P3
+        idle timeout. Raises :class:`ProtocolError` if the ECU has gone away, so
+        the keepalive ticker can log the loss.
+        """
+        self.obd_request(bytes((MODE_CURRENT_DATA, 0x00)))
+
     # -- OBD request/response ------------------------------------------------
     def obd_request(self, data: bytes, timeout: Optional[float] = None) -> bytes:
         """Send an OBD request; return the response payload (mode byte + data)."""
