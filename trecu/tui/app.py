@@ -46,12 +46,14 @@ _SPINE = {
     "reading": ("yellow", "●", "reading…"),
     "clearing": ("yellow", "●", "clearing codes…"),
     "connected": ("green", "●", "connected"),
-    "error": ("red", "●", "error — press 3 for the log"),
+    "error": ("red", "●", "error"),
 }
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """A small yes/no modal."""
+    """A small yes/no modal. Cancel is the default; escape cancels."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     ConfirmScreen {
@@ -80,8 +82,14 @@ class ConfirmScreen(ModalScreen[bool]):
                 yield Button("Yes, clear", variant="error", id="yes")
                 yield Button("Cancel", variant="primary", id="no")
 
+    def on_mount(self) -> None:
+        self.query_one("#no", Button).focus()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class TrecuApp(App):
@@ -127,9 +135,11 @@ class TrecuApp(App):
     BINDINGS = [
         Binding("r", "read", "Read"),
         Binding("c", "clear", "Clear"),
-        Binding("1", "show_tab('tab-dashboard')", "Dashboard"),
-        Binding("2", "show_tab('tab-faults')", "Faults"),
-        Binding("3", "show_tab('tab-log')", "Log"),
+        # TabbedContent's own left/right bindings switch tabs but are hidden
+        # (show=False). Re-declare them at app level with priority so they win
+        # the binding chain and appear in the footer.
+        Binding("left", "prev_tab", "Prev tab", priority=True),
+        Binding("right", "next_tab", "Next tab", priority=True),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -221,7 +231,9 @@ class TrecuApp(App):
     # -- helpers -------------------------------------------------------------
     def _append_log(self, msg: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        line = Text.assemble((f"{stamp}  ", "dim"), msg)
+        # Error lines use an "[error]" prefix (see _on_error); render them red.
+        style = "bold red" if msg.startswith("[error]") else ""
+        line = Text.assemble((f"{stamp}  ", "dim"), (msg, style))
         self.query_one("#log", RichLog).write(line)
 
     def _logger(self, msg: str) -> None:
@@ -230,6 +242,23 @@ class TrecuApp(App):
 
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
+
+    def _step_tab(self, delta: int) -> None:
+        tabs = self.query_one(TabbedContent)
+        order = [pane.id for pane in tabs.query(TabPane)]
+        if not order:
+            return
+        try:
+            idx = order.index(tabs.active)
+        except ValueError:
+            idx = 0
+        tabs.active = order[(idx + delta) % len(order)]
+
+    def action_prev_tab(self) -> None:
+        self._step_tab(-1)
+
+    def action_next_tab(self) -> None:
+        self._step_tab(1)
 
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated

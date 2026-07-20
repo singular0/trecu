@@ -83,6 +83,22 @@ J2012 codes (`P/C/B/U` + 4 hex) and looks up descriptions in
 `data/triumph_dtc.json`. Generic `P0xxx` codes are standardized; `P1xxx`/`P2xxx`
 are Triumph-specific and vary by model/year — extend the JSON, don't hardcode.
 
+**TUI layout (`tui/app.py`) is a one-row session "spine" over a
+`TabbedContent` body.** The spine shows the brand on the left and, right-aligned,
+a colored liveness dot + state label (`ready`/`connecting`/`reading`/`clearing`/
+`connected`/`error`, keyed off `_SPINE`) plus a synthetic MIL lamp — a red dot
+that lights only when the last read found stored faults. The body has three
+tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
+identity), **Faults** (the DTC `DataTable` with a centered "no faults" empty
+state), and **Log** (the raw protocol `RichLog`; error lines are red, and the
+app auto-switches here under `-v` and on error). Footer bindings are *contextual*
+via `check_action`: `r` Read shows on Dashboard/Faults, `c` Clear on Faults only;
+`←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
+own arrow bindings are hidden). **The "session" is framing, not yet mechanism:**
+Read/Clear still build a fresh `DiagnosticService` per keypress and tear it down
+(`_blocking_read`/`_blocking_clear`) — the persistent-session + keepalive model
+sketched in `docs/tui-redesign.md` (roadmap F1) is not built.
+
 **TUI threading:** Textual is async but the protocol stack is blocking. The app
 runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the
 protocol logger uses `call_from_thread` to marshal log lines back to the UI
