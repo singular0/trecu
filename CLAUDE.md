@@ -12,11 +12,10 @@ read it before touching the protocol layer.
 
 ## Commands
 
-This directory is **not a git repo** and Python is a mise-managed 3.11 in
-`.venv`. Always drive the venv explicitly:
+Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (23 tests, ~4s, no hardware)
+./.venv/bin/python -m pytest              # full suite (31 tests, ~10s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
 ./.venv/bin/trecu --mock --read           # headless read + print + exit
