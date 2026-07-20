@@ -138,6 +138,9 @@ def _print_dtcs(result) -> None:
     key = " ".join(f"{b:02X}" for b in result.key_bytes) or "-"
     proto = f" via {result.protocol}" if result.protocol else ""
     console.print(f"[bold]Connected{proto}.[/bold] ECU key bytes: {key}")
+    if result.ecu_info:
+        for label, value in result.ecu_info.as_rows():
+            console.print(f"  {label}: [cyan]{value}[/cyan]")
     if not result.dtcs:
         console.print("[green]No stored fault codes.[/green]")
         return

@@ -15,6 +15,7 @@ from .protocol.dtc import Dtc, DtcDatabase
 from .protocol.iso9141 import Iso9141Client, Iso9141Config
 from .protocol.kwp2000 import (
     ConnectionInfo,
+    EcuInfo,
     Kwp2000Client,
     Kwp2000Config,
     ProtocolError,
@@ -36,6 +37,7 @@ class ReadResult:
     dtcs: List[Dtc] = field(default_factory=list)
     session_started: bool = False
     protocol: str = ""
+    ecu_info: Optional[EcuInfo] = None
 
     @property
     def count(self) -> int:
@@ -63,6 +65,7 @@ class DiagnosticService:
         self._active = None            # connected client
         self._active_info: Optional[ConnectionInfo] = None
         self._active_proto = ""
+        self._ecu_info: Optional[EcuInfo] = None  # cached for the session
 
     # -- lifecycle -----------------------------------------------------------
     def open(self) -> None:
@@ -117,6 +120,7 @@ class DiagnosticService:
     # -- operations ----------------------------------------------------------
     def read_faults(self) -> ReadResult:
         client = self._connect()
+        ecu_info = self._read_identification(client)
         triples = client.read_dtcs()
         dtcs = self.db.decode_all(triples)
         info = self._active_info
@@ -125,7 +129,26 @@ class DiagnosticService:
             dtcs=dtcs,
             session_started=info.session_started if info else False,
             protocol=self._active_proto,
+            ecu_info=ecu_info if ecu_info and not ecu_info.is_empty else None,
         )
+
+    def read_identification(self) -> Optional[EcuInfo]:
+        """Read (and cache) ECU identity for the active session."""
+        return self._read_identification(self._connect())
+
+    def _read_identification(self, client) -> Optional[EcuInfo]:
+        """Best-effort identity read, cached so re-reads don't re-query the ECU."""
+        if self._ecu_info is not None:
+            return self._ecu_info
+        fn = getattr(client, "read_identification", None)
+        if fn is None:
+            return None
+        try:
+            self._ecu_info = fn()
+        except (ProtocolError, TransportError) as exc:
+            self._logger(f"identification skipped: {exc}")
+            self._ecu_info = EcuInfo()
+        return self._ecu_info
 
     def clear_faults(self) -> None:
         client = self._connect()

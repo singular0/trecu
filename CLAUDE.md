@@ -44,8 +44,11 @@ Transport (transport/base.py)    ← half-duplex byte pipe: serial or mock
 
 **The two protocol clients are duck-typed peers, not a class hierarchy.** Both
 expose `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
-`clear_dtcs()`, and `stop_communication()`. `iso9141.py` imports the *shared*
-types (`ConnectionInfo`, `Logger`, `ProtocolError`) *from* `kwp2000.py` — so
+`read_identification() -> EcuInfo`, `clear_dtcs()`, and `stop_communication()`.
+`read_identification()` is best-effort (OBD Mode 09 / KWP ReadEcuIdentification
+0x1A) — a missing reply yields empty fields, not an error. `iso9141.py` imports
+the *shared* types (`ConnectionInfo`, `EcuInfo`, `Logger`, `ProtocolError`,
+`decode_identification_ascii`) *from* `kwp2000.py` — so
 kwp2000 is effectively the home of the common protocol vocabulary even though
 the two speak entirely different wire protocols. Keep any new shared type there.
 
@@ -68,7 +71,9 @@ branches on them rather than on concrete types:
 `transport/mock.py`). `MockObdTransport` is the default `--mock` and emulates the
 real bike observed over the cable: 5-baud init, key bytes `08 08`, one stored
 `P1108` with MIL on. It's the ground truth for the iso9141 path — if you change
-that client, update this mock to match and vice versa.
+that client, update this mock to match and vice versa. Both mocks also serve
+**placeholder** ECU identity (Mode 09 / RLI records) so identification is
+testable — those VIN/calibration strings are invented, not real-bike facts.
 
 **KWP2000 framing (`protocol/framing.py`) is pure and transport-independent** —
 build/parse ISO 14230 frames, checksum, incremental length hints. Test it in

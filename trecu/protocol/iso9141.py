@@ -14,17 +14,29 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..transport.base import Transport, TransportError
-from .kwp2000 import ConnectionInfo, Logger, ProtocolError
+from .kwp2000 import (
+    ConnectionInfo,
+    EcuInfo,
+    Logger,
+    ProtocolError,
+    decode_identification_ascii,
+)
 
 # OBD-II (SAE J1979) service/mode identifiers we use.
 MODE_CURRENT_DATA = 0x01
 MODE_STORED_DTC = 0x03
 MODE_CLEAR_DTC = 0x04
 MODE_PENDING_DTC = 0x07
+MODE_VEHICLE_INFO = 0x09
 POSITIVE_OFFSET = 0x40
+
+# Mode 09 (vehicle information) PIDs.
+VI_PID_VIN = 0x02
+VI_PID_CALIBRATION_ID = 0x04
+VI_PID_ECU_NAME = 0x0A
 
 # Synthetic per-DTC status bytes so decoded codes carry a meaningful label
 # (OBD Mode 03/07 do not include a KWP-style status byte).
@@ -46,6 +58,7 @@ class Iso9141Config:
     request_gap: float = 0.06              # min idle between requests (P3)
     init_retries: int = 4                  # slow-init can need a few tries
     retry_wait: float = 2.0                # settle time between init attempts
+    id_timeout: float = 0.5                # per-PID wait for Mode 09 (often unsupported)
 
 
 class Iso9141Client:
@@ -202,6 +215,35 @@ class Iso9141Client:
             a = resp[2]
             return (bool(a & 0x80), a & 0x7F)
         return (False, 0)
+
+    def read_identification(self) -> EcuInfo:
+        """Read ECU identity via OBD Mode 09 (VIN / Calibration ID / ECU name).
+
+        Best-effort: many motorcycle ECUs don't implement Mode 09, so each PID
+        is queried with a short timeout and a missing reply yields an empty
+        field rather than an error.
+        """
+        raw: Dict[int, bytes] = {}
+        vin = self._read_vehicle_info(VI_PID_VIN, raw)
+        calibration = self._read_vehicle_info(VI_PID_CALIBRATION_ID, raw)
+        ecu_name = self._read_vehicle_info(VI_PID_ECU_NAME, raw)
+        return EcuInfo(
+            vin=vin, calibration_id=calibration, ecu_name=ecu_name, raw=raw
+        )
+
+    def _read_vehicle_info(self, pid: int, raw: Dict[int, bytes]) -> str:
+        try:
+            resp = self.obd_request(
+                bytes((MODE_VEHICLE_INFO, pid)), timeout=self.config.id_timeout
+            )
+        except ProtocolError:
+            return ""
+        # Response payload: 49 <pid> <count> <ascii...>
+        if len(resp) < 3 or resp[0] != MODE_VEHICLE_INFO + POSITIVE_OFFSET or resp[1] != pid:
+            return ""
+        data = resp[2:]
+        raw[pid] = bytes(data)
+        return decode_identification_ascii(data)
 
     def _read_dtc_mode(
         self, mode: int, status: int, timeout: Optional[float] = None

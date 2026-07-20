@@ -11,8 +11,8 @@ model-specific values.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..transport.base import Transport, TransportError
 from .framing import (
@@ -32,6 +32,7 @@ SID_START_DIAGNOSTIC_SESSION = 0x10
 SID_TESTER_PRESENT = 0x3E
 SID_CLEAR_DIAGNOSTIC_INFO = 0x14
 SID_READ_DTC_BY_STATUS = 0x18
+SID_READ_ECU_IDENTIFICATION = 0x1A
 
 POSITIVE_RESPONSE_OFFSET = 0x40
 NEGATIVE_RESPONSE = 0x7F
@@ -52,6 +53,16 @@ _NRC_NAMES = {
 }
 
 Logger = Callable[[str], None]
+
+
+def decode_identification_ascii(data: bytes) -> str:
+    """Best-effort ASCII text from an identification payload.
+
+    Identification responses (OBD Mode 09, KWP ReadEcuIdentification) wrap the
+    text in a leading count/NODI byte and may zero-pad it.  Keeping only
+    printable ASCII drops both without needing to know the exact framing.
+    """
+    return "".join(chr(b) for b in data if 0x20 <= b <= 0x7E).strip()
 
 
 class ProtocolError(Exception):
@@ -87,12 +98,51 @@ class Kwp2000Config:
     max_pending: int = 20
     init_low_ms: int = 25
     init_high_ms: int = 25
+    # ReadEcuIdentification record-local-identifiers (model/ECU-specific; set any
+    # to None to skip). Defaults follow the common KWP2000 assignments.
+    id_vin_rli: Optional[int] = 0x90       # vehicle identification number
+    id_hardware_rli: Optional[int] = 0x91  # ECU hardware number
+    id_software_rli: Optional[int] = 0x94  # ECU software / calibration version
 
 
 @dataclass
 class ConnectionInfo:
     key_bytes: bytes
     session_started: bool
+
+
+@dataclass
+class EcuInfo:
+    """ECU identity, populated best-effort from either protocol path.
+
+    Shared vocabulary (like :class:`ConnectionInfo`): the OBD Mode 09 fields map
+    directly; the KWP ``ReadEcuIdentification`` records map onto the same slots
+    (software version -> ``calibration_id``, hardware number -> ``ecu_name``).
+    """
+
+    vin: str = ""
+    calibration_id: str = ""
+    ecu_name: str = ""
+    raw: Dict[int, bytes] = field(default_factory=dict)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.vin or self.calibration_id or self.ecu_name)
+
+    def as_rows(self) -> List[Tuple[str, str]]:
+        """(label, value) pairs for the fields that were actually read."""
+        rows: List[Tuple[str, str]] = []
+        if self.ecu_name:
+            rows.append(("ECU", self.ecu_name))
+        if self.vin:
+            rows.append(("VIN", self.vin))
+        if self.calibration_id:
+            rows.append(("Calibration", self.calibration_id))
+        return rows
+
+    def summary(self) -> str:
+        """Compact one-line identity for a status bar."""
+        return " · ".join(v for v in (self.ecu_name, self.vin) if v)
 
 
 class Kwp2000Client:
@@ -273,6 +323,37 @@ class Kwp2000Client:
                 f"note: ECU reported {count} DTCs, parsed {len(triples)} triples"
             )
         return triples
+
+    def read_identification(self) -> EcuInfo:
+        """Read ECU identity via ReadEcuIdentification (best-effort per record).
+
+        Each configured record-local-identifier is queried independently; an
+        unsupported record (negative response) yields an empty field rather than
+        failing the whole call.
+        """
+        cfg = self.config
+        raw: Dict[int, bytes] = {}
+        vin = self._read_ecu_id(cfg.id_vin_rli, raw)
+        hardware = self._read_ecu_id(cfg.id_hardware_rli, raw)
+        software = self._read_ecu_id(cfg.id_software_rli, raw)
+        return EcuInfo(
+            vin=vin, ecu_name=hardware, calibration_id=software, raw=raw
+        )
+
+    def _read_ecu_id(self, rli: Optional[int], raw: Dict[int, bytes]) -> str:
+        if rli is None:
+            return ""
+        try:
+            resp = self.request(bytes((SID_READ_ECU_IDENTIFICATION, rli)))
+        except ProtocolError as exc:
+            self._log(f"ReadEcuIdentification 0x{rli:02X} skipped: {exc}")
+            return ""
+        # Response: 5A <rli> <data...>
+        if len(resp) < 3 or resp[1] != rli:
+            return ""
+        data = resp[2:]
+        raw[rli] = bytes(data)
+        return decode_identification_ascii(data)
 
     def clear_dtcs(self) -> None:
         """Clear stored DTCs (clearDiagnosticInformation, all groups)."""

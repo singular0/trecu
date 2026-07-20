@@ -37,12 +37,21 @@ class MockKLineTransport(Transport):
         tester_address: int = 0xF1,
         addr_mode: int = ADDR_PHYSICAL,
         key_bytes: bytes = b"\xEA\x8F",
+        vin: str = "SMTA469N4KT700001",
+        hardware: str = "1050ECU-KEIHIN",
+        software: str = "V1.23",
     ):
         self._dtcs = list(_DEFAULT_DTCS if dtcs is None else dtcs)
         self.ecu_address = ecu_address
         self.tester_address = tester_address
         self.addr_mode = addr_mode
         self.key_bytes = key_bytes
+        # ReadEcuIdentification records, keyed by the default config RLIs.
+        self._identification = {
+            0x90: vin.encode("ascii", "ignore"),
+            0x91: hardware.encode("ascii", "ignore"),
+            0x94: software.encode("ascii", "ignore"),
+        }
         self._rx = bytearray()      # bytes waiting for the client to read
         self._open = False
         self._connected = False
@@ -102,6 +111,13 @@ class MockKLineTransport(Transport):
             if sub == 0x02:  # response suppressed
                 return None
             return bytes((0x7E, sub))
+
+        if sid == 0x1A:  # ReadEcuIdentification
+            rli = payload[1] if len(payload) > 1 else 0
+            data = self._identification.get(rli)
+            if data is None:
+                return bytes((0x7F, 0x1A, 0x31))  # requestOutOfRange
+            return bytes((0x5A, rli)) + data
 
         if sid == 0x18:  # ReadDTCByStatus
             body = bytearray((0x58, len(self._dtcs)))

@@ -30,12 +30,17 @@ class MockObdTransport(Transport):
         key_bytes: bytes = b"\x08\x08",
         init_address: int = 0x33,
         resp_header: bytes = b"\x48\x6B\xD1",
+        vin: str = "SMTA469N4KT700001",
+        calibration_id: str = "T1291234",
+        ecu_name: str = "Sagem MC2000",
     ):
         self._dtcs = list(_DEFAULT_DTCS if dtcs is None else dtcs)
         self.mil = mil
         self.key_bytes = key_bytes
         self.init_address = init_address
         self.resp_header = resp_header
+        # Mode 09 vehicle-information strings ("" = PID unsupported, no reply).
+        self._vehicle_info = {0x02: vin, 0x04: calibration_id, 0x0A: ecu_name}
         self._rx = bytearray()
         self._await_inv = False
 
@@ -106,6 +111,12 @@ class MockObdTransport(Transport):
             self._dtcs.clear()
             self.mil = False
             self._emit(bytes((0x44,)))
+        elif mode == 0x09:  # vehicle information (VIN / cal ID / ECU name)
+            pid = payload[1] if len(payload) > 1 else 0
+            text = self._vehicle_info.get(pid, "")
+            if text:
+                # 49 <pid> <count=1> <ascii...>
+                self._emit(bytes((0x49, pid, 0x01)) + text.encode("ascii", "ignore"))
         elif mode == 0x07:  # pending DTCs — unsupported on this ECU (no reply)
             return
         # anything else: no response, like the real ECU

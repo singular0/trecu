@@ -4,8 +4,9 @@ A macOS terminal (TUI) app that reads and decodes **ECU fault codes from Triumph
 motorcycles** over a cheap **KKL (FT232RL) K-line cable**.
 
 It talks to the ECU over the K-line using either of the two protocols Triumphs
-use, reads stored Diagnostic Trouble Codes (DTCs), decodes them to human-readable
-descriptions, and lets you clear them — all from a keyboard-driven terminal UI.
+use, identifies the ECU (VIN / calibration / part), reads stored Diagnostic
+Trouble Codes (DTCs), decodes them to human-readable descriptions, and lets you
+clear them — all from a keyboard-driven terminal UI.
 
 Two protocol paths, auto-detected by default:
 
@@ -117,14 +118,16 @@ Port selection when launching the TUI:
 1. **5-baud slow init** at address `0x33` → ECU replies with sync `0x55` + key
    bytes; the tester answers with the inverted key byte and the ECU returns the
    inverted address. Session open.
-2. **Mode 03** (`68 6A F1 03`) → stored DTCs; **Mode 07** → pending; **Mode 01
+2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name).
+3. **Mode 03** (`68 6A F1 03`) → stored DTCs; **Mode 07** → pending; **Mode 01
    PID 01** → MIL status + count.
-3. **Mode 04** clears codes on request.
+4. **Mode 04** clears codes on request.
 
 **KWP2000 fast path** (`kwp-fast`):
 
 1. **Fast-init** (K-line low 25 ms / high 25 ms via the UART break) →
-   **StartCommunication** (`0x81`) → key bytes → **ReadDTCByStatus** (`0x18`);
+   **StartCommunication** (`0x81`) → key bytes → **ReadEcuIdentification**
+   (`0x1A`) for VIN/part/version → **ReadDTCByStatus** (`0x18`);
    **ClearDiagnosticInformation** (`0x14`) to clear.
 
 Either way, each DTC is decoded per **SAE J2012** (`P/C/B/U` + 4 hex digits) and

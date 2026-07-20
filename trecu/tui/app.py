@@ -107,6 +107,7 @@ class TrecuApp(App):
         # Used only when no port is known yet and the user must choose one.
         self._list_ports = list_ports
         self._transport_for_port = transport_for_port
+        self._shown_ecu: Optional[str] = None  # last ECU identity logged
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -171,7 +172,17 @@ class TrecuApp(App):
             table.add_row(*dtc.as_row())
         key = " ".join(f"{b:02X}" for b in result.key_bytes) or "-"
         state = f"{result.count} fault code(s)" if result.count else "no fault codes"
-        self._set_status(state, f"key bytes {key}")
+        extra = f"key bytes {key}"
+        if result.ecu_info:
+            summary = result.ecu_info.summary()
+            if summary:
+                extra = f"{extra}  ·  {summary}"
+            # Log the full identity once per distinct ECU.
+            if summary != self._shown_ecu:
+                self._shown_ecu = summary
+                for label, value in result.ecu_info.as_rows():
+                    self._append_log(f"{label}: {value}")
+        self._set_status(state, extra)
 
     # -- port selection ------------------------------------------------------
     def _choose_port(self) -> None:
