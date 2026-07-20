@@ -105,6 +105,11 @@ model codes surface. No new architecture.
 **Goal:** continuously poll and display RPM, TPS, MAP, O2, coolant temp, battery
 voltage.
 
+> **UI concept:** see [`docs/tui-redesign.md`](docs/tui-redesign.md) — reframes
+> the TUI from a one-shot DTC reader into a persistent diagnostic session with
+> the DTC list as one view among several (Dashboard / Live Data / Throttle Sync).
+> That redesign is the UI side of F1 and the front end for this phase and Phase 4.
+
 - **First real streaming feature** — this is where F1 (persistent session +
   keepalive) becomes mandatory.
 - *Protocol:*

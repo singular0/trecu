@@ -195,7 +195,12 @@ def _cmd_clear(args: argparse.Namespace) -> int:
 def _cmd_tui(args: argparse.Namespace) -> int:
     from .tui.app import TrecuApp
 
-    common = dict(config=_make_config(args), db=_load_db(args), protocol=args.protocol)
+    common = dict(
+        config=_make_config(args),
+        db=_load_db(args),
+        protocol=args.protocol,
+        verbose=args.verbose,
+    )
 
     if args.mock:
         # Share one simulated ECU across connects so clearing codes persists,
