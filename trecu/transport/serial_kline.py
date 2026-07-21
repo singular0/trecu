@@ -135,11 +135,15 @@ class KLineSerialTransport(Transport):
         self.reset_input()
 
     def five_baud_init(self, address: int) -> None:
-        """Best-effort ISO 9141 / ISO 14230 5-baud slow init.
+        """ISO 9141 / ISO 14230 5-baud slow init.
 
         Bit-bangs the address byte at 5 baud using the break condition (start
-        bit + 8 data bits LSB-first + stop bit).  Timing at 5 baud is coarse and
-        driver-dependent, so treat this as experimental and prefer fast-init.
+        bit + 8 data bits LSB-first + stop bit). Each bit edge is scheduled
+        against an **absolute** deadline derived from a single start time, so the
+        per-bit ``break_condition`` ioctl latency and ``sleep`` overshoot cannot
+        *accumulate* across the 10-bit frame — a naive ``sleep(bit_time)`` per
+        bit drifts enough over the frame that the ECU samples the wrong address
+        and the handshake fails intermittently.
         """
         dev = self._dev
         bit_time = 1.0 / 5.0  # 200 ms per bit
@@ -147,10 +151,14 @@ class KLineSerialTransport(Transport):
         # Frame: 1 start bit (0), 8 data bits LSB first, 1 stop bit (1).
         bits = [0] + [(address >> i) & 1 for i in range(8)] + [1]
         try:
-            for bit in bits:
+            start = time.monotonic()
+            for i, bit in enumerate(bits):
                 # break asserted == line low == logical 0
                 dev.break_condition = (bit == 0)
-                time.sleep(bit_time)
+                # Hold this bit until its slot ends on the absolute schedule.
+                remaining = (start + (i + 1) * bit_time) - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
             dev.break_condition = False
         except (OSError, ValueError) as exc:
             raise TransportError(f"5-baud init failed: {exc}") from exc

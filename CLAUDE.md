@@ -206,6 +206,21 @@ it to the config rather than inlining a constant.
 - Live-confirmed read: one stored `P1108` (ambient-pressure sensor) with MIL on.
 - The ECU needs a few seconds to settle between back-to-back 5-baud init
   attempts; `Iso9141Client` retries (`init_retries`, `retry_wait`) cover this.
+- **The 5-baud init is timing-flaky on macOS**: roughly half of first attempts
+  return garbled key bytes (e.g. `08 00`, `08 88`) because the FTDI break-toggle
+  timing is coarse. `_slow_init` therefore **validates the handshake** — it
+  requires the ECU's inverted-address reply (`0xCC` for init address `0x33`) and
+  rejects a garbled/incomplete init so the `connect()` retry loop tries again,
+  rather than proceeding on a half-open link. A validated init is `08 08`/`CC`;
+  observed to recover to a good read within one or two retries, every time.
+- **This ECU answers OBD Mode 03 only while the fault is currently latched**
+  (MIL on). When latched it returns `43 11 08 …` → `P1108`; when the sensor
+  reads OK the MIL clears and Mode 03 goes *silent* (no `43` frame at all). By
+  contrast **Mode 01 PID 01 (MIL + DTC count) answers reliably** — so it is the
+  authority. `read_dtcs` reads PID 01 first, uses its count to drive a Mode 03
+  retry/reconcile, and **raises** if the count says codes exist but Mode 03 will
+  not enumerate them. A bare Mode-03 timeout must never be reported as "no
+  codes" — that false-negative is exactly what made reads look flaky.
 
 ## K-line protocol reference
 
@@ -218,10 +233,12 @@ decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
 
 1. **5-baud slow init** at address `0x33` → ECU replies with sync `0x55` + key
    bytes; the tester answers with the inverted key byte and the ECU returns the
-   inverted address. Session open.
+   inverted address. The client **requires** that inverted-address byte to
+   accept the session (a garbled 5-baud frame otherwise looks "connected").
 2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name).
-3. **Mode 03** (`68 6A F1 03`) → stored DTCs; **Mode 07** → pending; **Mode 01
-   PID 01** → MIL status + count.
+3. **Mode 01 PID 01** → MIL status + DTC count (the reliable authority), read
+   *first*; then **Mode 03** (`68 6A F1 03`) → stored DTCs (retried and
+   reconciled against the count); **Mode 07** → pending (best-effort).
 4. **Mode 01** per PID → live sensor data (Phase 3); **Mode 04** → clear codes.
 
 **KWP2000 fast path (`kwp-fast`):**

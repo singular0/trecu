@@ -462,6 +462,15 @@ class TrecuApp(App):
             self._on_error(exc)
             return
         self._live_busy = False
+        # A poll can outlive the Live Data tab (it blocks on the shared I/O lock
+        # behind a read/keepalive). If the user has since left the tab,
+        # _sync_live_polling already cleared _streaming — don't resurrect it.
+        try:
+            still_live = self.query_one(TabbedContent).active == "tab-live"
+        except Exception:
+            still_live = False
+        if not still_live:
+            return
         self._update_live_table(readings)
         self._streaming = True
         if self._state != "connected":

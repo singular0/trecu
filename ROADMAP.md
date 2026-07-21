@@ -123,6 +123,15 @@ Both paths implemented, decoded, and tested (`test_iso9141_obd.py`,
 `test_mock_roundtrip.py`). Ongoing: extend `triumph_dtc.json` coverage as new
 model codes surface. No new architecture.
 
+**Hardened against the real bike (2026-07):** the confirmed OBD read was
+silently reporting comms failures as "no stored codes." Three fixes, validated
+live (6/6 reads of `P1108`, was 0/6): (1) absolute-deadline 5-baud bit timing;
+(2) `_slow_init` now requires the inverted-address handshake byte, so a garbled
+init retries instead of proceeding on a dead link; (3) `read_dtcs` reads the
+reliable Mode 01 PID 01 (MIL + count) first and reconciles Mode 03 against it,
+retrying and **raising** rather than returning a false empty. See CLAUDE.md
+"Known real-hardware facts" for the ECU behavior these address.
+
 ## Phase 3 — Live sensor data streaming  · **L**  · needs F1 (+ F2) · **done** (OBD path)
 
 **Goal:** continuously poll and display RPM, TPS, MAP, O2, coolant temp, battery

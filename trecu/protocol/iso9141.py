@@ -60,6 +60,8 @@ class Iso9141Config:
     retry_wait: float = 2.0                # settle time between init attempts
     id_timeout: float = 0.5                # per-PID wait for Mode 09 (often unsupported)
     live_timeout: float = 0.4              # per-PID wait when polling Mode 01 live data
+    dtc_retries: int = 3                   # Mode 03 answers intermittently; retry
+    dtc_retry_wait: float = 0.2            # settle between Mode 03 retries
 
 
 class Iso9141Client:
@@ -134,10 +136,23 @@ class Iso9141Client:
         if t.echoes:
             self._read_byte(cfg.byte_timeout)  # discard echo of our inverted byte
         inv_addr = self._read_byte(cfg.byte_timeout)
-        self._log(
-            f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, "
-            f"inv-addr {'--' if inv_addr is None else f'{inv_addr:02X}'}"
-        )
+        # The ECU closes the handshake by echoing the inverted init address; its
+        # arrival is proof it accepted our key-byte reply. A missing or wrong
+        # inv-addr means the init didn't take (seen on the real bike when 5-baud
+        # timing drifts and the key bytes come back garbled) — reject so the
+        # connect() retry loop tries again rather than proceeding on a dead link.
+        expected = (~cfg.init_address) & 0xFF
+        if inv_addr is None:
+            raise ProtocolError(
+                f"slow-init handshake incomplete (key bytes {kb1:02X} {kb2:02X}): "
+                "no inverted-address reply"
+            )
+        if inv_addr != expected:
+            raise ProtocolError(
+                f"slow-init handshake mismatch: inv-addr {inv_addr:02X}, "
+                f"expected {expected:02X}"
+            )
+        self._log(f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, inv-addr {inv_addr:02X}")
         return bytes((kb1, kb2))
 
     def connect(self) -> ConnectionInfo:
@@ -217,16 +232,30 @@ class Iso9141Client:
         return bytes(buf)
 
     # -- high level ----------------------------------------------------------
-    def read_status(self) -> Tuple[bool, int]:
-        """Mode 01 PID 01 -> (MIL on?, stored DTC count)."""
-        try:
-            resp = self.obd_request(bytes((MODE_CURRENT_DATA, 0x01)))
-        except ProtocolError:
-            return (False, 0)
-        if len(resp) >= 3 and resp[0] == MODE_CURRENT_DATA + POSITIVE_OFFSET:
+    def _read_status_strict(self) -> Tuple[bool, int]:
+        """Mode 01 PID 01 -> (MIL on?, stored DTC count); raises if unanswered.
+
+        On the real Sagem ECU, Mode 01 PID 01 answers reliably where Mode 03
+        does not, so it is the authority for whether faults exist. A missing or
+        malformed reply therefore means the *session is dead*, not that there
+        are zero faults — so raise rather than silently return ``(False, 0)``.
+        """
+        resp = self.obd_request(bytes((MODE_CURRENT_DATA, 0x01)))
+        if (
+            len(resp) >= 3
+            and resp[0] == MODE_CURRENT_DATA + POSITIVE_OFFSET
+            and resp[1] == 0x01
+        ):
             a = resp[2]
             return (bool(a & 0x80), a & 0x7F)
-        return (False, 0)
+        raise ProtocolError(f"unexpected Mode 01 PID 01 response: {self._hex(resp)}")
+
+    def read_status(self) -> Tuple[bool, int]:
+        """Best-effort Mode 01 PID 01 -> (MIL on?, stored DTC count)."""
+        try:
+            return self._read_status_strict()
+        except ProtocolError:
+            return (False, 0)
 
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
@@ -283,15 +312,13 @@ class Iso9141Client:
         raw[pid] = bytes(data)
         return decode_identification_ascii(data)
 
-    def _read_dtc_mode(
-        self, mode: int, status: int, timeout: Optional[float] = None
+    def _parse_dtc_response(
+        self, resp: bytes, mode: int, status: int
     ) -> List[Tuple[int, int, int]]:
-        try:
-            resp = self.obd_request(bytes((mode,)), timeout=timeout)
-        except ProtocolError:
-            return []
         if not resp or resp[0] != mode + POSITIVE_OFFSET:
-            return []
+            raise ProtocolError(
+                f"unexpected Mode {mode:02X} response: {self._hex(resp)}"
+            )
         body = resp[1:]  # DTC byte pairs
         out: List[Tuple[int, int, int]] = []
         for i in range(0, len(body) - 1, 2):
@@ -301,12 +328,65 @@ class Iso9141Client:
             out.append((hi, lo, status))
         return out
 
+    def _request_dtcs(
+        self, mode: int, status: int, timeout: Optional[float] = None
+    ) -> List[Tuple[int, int, int]]:
+        """One DTC request: triples on a positive response (possibly empty).
+
+        Raises :class:`ProtocolError` on no/invalid response, so the caller can
+        tell "the ECU said zero codes" apart from "the ECU never answered".
+        """
+        resp = self.obd_request(bytes((mode,)), timeout=timeout)
+        return self._parse_dtc_response(resp, mode, status)
+
+    def _read_stored(self, expected: int) -> List[Tuple[int, int, int]]:
+        """Read stored DTCs (Mode 03), reconciled against the reliable count.
+
+        The real Sagem ECU answers Mode 03 only intermittently even with the MIL
+        latched, so retry up to ``dtc_retries`` times. ``expected`` is the count
+        from Mode 01 PID 01 (the authority): if it says codes exist but Mode 03
+        keeps coming back empty, raise — reporting "no codes" for a read that
+        never actually enumerated is the bug that made reads look flaky.
+        """
+        attempts = max(1, self.config.dtc_retries)
+        result: List[Tuple[int, int, int]] = []
+        for attempt in range(attempts):
+            if attempt > 0:
+                time.sleep(self.config.dtc_retry_wait)
+            try:
+                result = self._request_dtcs(MODE_STORED_DTC, STATUS_CONFIRMED)
+            except ProtocolError as exc:
+                self._log(f"Mode 03 attempt {attempt + 1}/{attempts} failed: {exc}")
+                result = []
+            if len(result) >= expected:  # expected==0 accepts an empty result
+                return result
+        if not result and expected > 0:
+            raise ProtocolError(
+                f"status reports {expected} stored DTC(s) but Mode 03 returned "
+                f"none after {attempts} attempts"
+            )
+        if len(result) < expected:
+            self._log(
+                f"warning: status reports {expected} stored DTC(s), read {len(result)}"
+            )
+        return result
+
     def read_dtcs(self) -> List[Tuple[int, int, int]]:
-        """Read stored (Mode 03) and pending (Mode 07) DTCs as (hi, lo, status)."""
-        stored = self._read_dtc_mode(MODE_STORED_DTC, STATUS_CONFIRMED)
-        pending = self._read_dtc_mode(
-            MODE_PENDING_DTC, STATUS_PENDING, timeout=self.config.pending_timeout
-        )
+        """Read stored (Mode 03) + pending (Mode 07) DTCs as (hi, lo, status).
+
+        Mode 01 PID 01 (MIL + count) is this ECU's reliable authority, so it is
+        read first: its count drives the Mode 03 retry/reconcile, and a missing
+        PID 01 reply surfaces as a hard error (dead session) instead of a false
+        "no codes". Pending (Mode 07) is best-effort — unsupported on some ECUs.
+        """
+        _mil, count = self._read_status_strict()
+        stored = self._read_stored(count)
+        try:
+            pending = self._request_dtcs(
+                MODE_PENDING_DTC, STATUS_PENDING, timeout=self.config.pending_timeout
+            )
+        except ProtocolError:
+            pending = []
         seen = {(h, l) for h, l, _ in stored}
         return stored + [(h, l, s) for (h, l, s) in pending if (h, l) not in seen]
 
