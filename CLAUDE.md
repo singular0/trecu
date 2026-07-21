@@ -36,6 +36,22 @@ Tests run **entirely against the in-memory mock ECUs** — never require hardwar
 and any new test must follow suit. Use `-v` on the CLI to dump raw byte traffic
 when debugging a protocol.
 
+## Releasing
+
+The package **version is not stored in `pyproject.toml`** — it's derived from the
+git tag at build time by `hatch-vcs` (`[tool.hatch.version] source = "vcs"`), so
+`trecu.__version__` (and `trecu --version`) read it back from installed metadata
+via `importlib.metadata`. To cut a release, push a **semver tag** (`vMAJOR.MINOR.PATCH`,
+optionally `-prerelease`/`+build`): `.github/workflows/release.yml` fires **only**
+on those tags. It first runs the **mock-only test suite as a gate** (a `test` job
+the build `needs`), and only if that passes builds the sdist + wheel (whose version
+therefore equals the tag) and publishes them as assets on a **GitHub Release**
+(created via the `gh` CLI, no third-party action; a `-prerelease` tag is marked
+pre-release). Non-semver tags
+are ignored by the tag filter, and a strict-semver guard step fails anything that
+slips through. There is **no PyPI publish** — install is from the release wheel
+URL (see README).
+
 ## Architecture
 
 Four layers, top to bottom. Adding a protocol or transport means slotting into

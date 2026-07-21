@@ -1,10 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "trecu"
-version = "0.1.0"
+# Version is derived from the git tag at build time (see [tool.hatch.version]);
+# a release tag like `v1.2.3` produces the package version `1.2.3`.
+dynamic = ["version"]
 description = "TUI to read and decode ECU fault codes from Triumph motorcycles over a KKL (FT232RL) K-line cable"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +28,11 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 trecu = "trecu.cli:main"
+
+[tool.hatch.version]
+# hatch-vcs reads the version straight from the latest git tag, so the built
+# package version always matches the release tag (no manual bump to keep in sync).
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["trecu"]

@@ -62,11 +62,42 @@ reads live data only — it never flashes or tunes the ECU.** Use at your own ri
 
 ### Install
 
+Each release publishes a built wheel on the project's
+[**GitHub Releases**](https://github.com/singular0/trecu/releases) page. Install
+it straight from there — no clone or build step needed. Replace `X.Y.Z` with the
+latest release version:
+
 ```bash
-git clone <this repo> && cd trecu
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .            # add ".[ftdi]" for direct pyftdi access
+pip install https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl
 ```
+
+For direct `pyftdi` access, pull in the optional extra:
+
+```bash
+pip install "trecu[ftdi] @ https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl"
+```
+
+Prefer an isolated install for a command-line tool?
+[`pipx`](https://pypa.github.io/pipx/) works with the same URL:
+
+```bash
+pipx install https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl
+```
+
+<details>
+<summary>Install from source (for development)</summary>
+
+```bash
+git clone https://github.com/singular0/trecu.git && cd trecu
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"     # add "ftdi" to the extras for direct pyftdi access
+```
+
+The package version is derived from the git tag at build time (via `hatch-vcs`),
+so an editable checkout reports a development version until you build from a
+tagged commit.
+
+</details>
 
 ### Launch the TUI
 
