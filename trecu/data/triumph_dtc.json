@@ -1,9 +1,4 @@
 {
-  "meta": {
-    "note": "Generic SAE J2012 powertrain (P0xxx) codes are standardized and reliable. Triumph manufacturer-specific (P1xxx/P2xxx) entries below are sourced from official Triumph service manuals (Daytona 675, Thunderbird, 2017 Street Twin) with forum corroboration. Descriptions can still vary by model/year; unknown codes decode structurally and fall back to a generic message.",
-    "sources": ["SAE J2012 generic definitions", "Triumph Daytona 675 service manual DTC table", "Triumph Thunderbird service manual", "Triumph Street Twin 900 workshop manual", "triumphrat.net / triumph675.net"],
-    "version": 2
-  },
   "codes": {
     "P0030": {"desc": "O2 sensor heater control circuit (bank 1, sensor 1)", "subsystem": "Oxygen sensor"},
     "P0031": {"desc": "O2 sensor heater control circuit low (bank 1, sensor 1)", "subsystem": "Oxygen sensor"},
