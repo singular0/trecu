@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`trecu` is a macOS TUI (Textual) that reads and decodes ECU fault codes (DTCs)
+`trecu` is a cross-platform TUI (Textual) that reads and decodes ECU fault codes (DTCs)
 from Triumph motorcycles over a cheap KKL / FT232RL K-line cable. It speaks the
 two protocols Triumphs use, decodes DTCs per SAE J2012, and can clear them.
 `README.md` is the user-facing guide; the byte-level K-line handshake lives in

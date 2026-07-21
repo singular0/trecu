@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"TrECU {__version__}")
 
     conn = p.add_argument_group("connection")
-    conn.add_argument("-p", "--port", help="serial port (e.g. /dev/cu.usbserial-XXXX)")
+    conn.add_argument("-p", "--port", help="serial port (e.g. /dev/ttyUSB0, /dev/cu.usbserial-XXXX, or COM3)")
     conn.add_argument("--baud", type=int, default=10400, help="K-line baud rate (default 10400)")
     conn.add_argument("--mock", action="store_true", help="use a simulated ECU (no hardware)")
     conn.add_argument(

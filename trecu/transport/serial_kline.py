@@ -1,9 +1,10 @@
 """FT232RL / KKL cable K-line transport built on pyserial.
 
-A KKL cable (FT232RL + a K-line driver transistor) enumerates on macOS through
-the FTDI VCP driver as ``/dev/cu.usbserial-XXXX``.  We drive it as an ordinary
-serial port at the KWP2000 line rate (10400 baud, 8N1) and perform the
-fast-init wake-up by toggling the UART break condition, which pulls the K-line.
+A KKL cable (FT232RL + a K-line driver transistor) enumerates through the host's
+FTDI serial (VCP) driver as an ordinary serial port (``/dev/ttyUSB0``,
+``/dev/cu.usbserial-XXXX``, ``COMx``).  We drive it at the KWP2000 line rate
+(10400 baud, 8N1) and perform the fast-init wake-up by toggling the UART break
+condition, which pulls the K-line.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def list_serial_ports() -> List[dict]:
     """Return metadata for the serial ports currently present on the system.
 
     FTDI-based KKL cables usually show a ``vid:pid`` of ``0403:6001`` and a
-    device path like ``/dev/cu.usbserial-…`` on macOS.
+    device path like ``/dev/ttyUSB0``, ``/dev/cu.usbserial-…``, or ``COMx``.
     """
     ports = []
     for p in list_ports.comports():

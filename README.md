@@ -1,6 +1,6 @@
 # TrECU
 
-**TrECU** is a macOS terminal app (TUI) that reads, decodes, and clears **fault
+**TrECU** is a terminal app (TUI) that reads, decodes, and clears **fault
 codes from Triumph motorcycle ECUs** — and streams **live sensor data** — over a
 cheap **KKL diagnostic cable based on the FTDI FT232RL** chip. It talks to the
 ECU directly on the single-wire K-line, so there is no ELM327 or OBD dongle in
@@ -27,7 +27,9 @@ bike's diagnostic connector.
 
 **This is a hobby, "vibe-coded" project.** It was written quickly with heavy AI
 assistance and has only ever been tested against **one motorcycle: a Triumph
-Bonneville 865 EFI (2009)**. It may or may not work on your bike.
+Bonneville 865 EFI (2009)**, on **Intel macOS**. The code is pure Python on
+cross-platform libraries (pyserial, textual), so it should also run on Linux and
+Windows — but that is untested. It may or may not work on your bike.
 
 Triumph diagnostics are not officially documented — everything here rests on
 community reverse engineering, and the exact protocol parameters differ by
@@ -49,12 +51,13 @@ reads live data only — it never flashes or tunes the ECU.** Use at your own ri
 
 ### Requirements
 
-- macOS with **Python 3.10+**
+- **Python 3.10+**
 - A KKL diagnostic cable based on the **FTDI FT232RL** chip, plus the correct
   Triumph adapter/pinout for your bike's connector (K-line, +12V, ground)
-- The **FTDI VCP driver**, so the cable enumerates as `/dev/cu.usbserial-XXXX`
-  (recent macOS bundles one; otherwise install FTDI's
-  [VCP driver](https://ftdichip.com/drivers/vcp-drivers/))
+- An **FTDI serial (VCP) driver**, so the cable enumerates as an ordinary serial
+  port — `/dev/ttyUSB0` (Linux), `/dev/cu.usbserial-XXXX` (macOS), or `COMx`
+  (Windows). Linux and recent macOS ship one in-box; on Windows install FTDI's
+  [VCP driver](https://ftdichip.com/drivers/vcp-drivers/)
 - Ignition **ON**
 
 ### Install
@@ -68,9 +71,9 @@ pip install -e .            # add ".[ftdi]" for direct pyftdi access
 ### Launch the TUI
 
 ```bash
-trecu --list-ports                        # find your /dev/cu.usbserial-XXXX
-trecu                                      # auto-select the cable (or open a picker)
-trecu --port /dev/cu.usbserial-A1B2C3      # use a specific port
+trecu --list-ports        # find your cable's serial port
+trecu                     # auto-select the cable (or open a picker)
+trecu --port <port>       # use a specific port
 ```
 
 With no `--port`, trecu auto-selects when exactly one FTDI/KKL cable is present,
@@ -81,10 +84,10 @@ Data stream, `q` quit.
 ### Headless CLI
 
 ```bash
-trecu --port /dev/cu.usbserial-A1B2C3 --read       # read + print codes, then exit
-trecu --port /dev/cu.usbserial-A1B2C3 --live       # print a live-sensor snapshot
-trecu --port /dev/cu.usbserial-A1B2C3 --clear      # clear codes (asks first)
-trecu --port /dev/cu.usbserial-A1B2C3 --read -v    # same, plus raw byte traffic
+trecu --port <port> --read       # read + print codes, then exit
+trecu --port <port> --live       # print a live-sensor snapshot
+trecu --port <port> --clear      # clear codes (asks first)
+trecu --port <port> --read -v    # same, plus raw byte traffic
 ```
 
 If auto-detection fails on your bike, force a protocol and adjust its parameters
