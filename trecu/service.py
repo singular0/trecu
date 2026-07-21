@@ -11,10 +11,11 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterable, Iterator, List, Optional
 
 from .protocol.dtc import Dtc, DtcDatabase
 from .protocol.iso9141 import Iso9141Client, Iso9141Config
+from .protocol.pids import FormulaError, PidDatabase, SensorReading
 from .protocol.kwp2000 import (
     ConnectionInfo,
     EcuInfo,
@@ -35,6 +36,12 @@ _AUTO_ORDER = (PROTOCOL_ISO9141, PROTOCOL_KWP_FAST)
 # Keepalive cadence for a persistent session. Both protocols' idle timeout
 # (KWP2000 P3max, ISO 9141-2) is ~5 s, so beat comfortably under that.
 DEFAULT_KEEPALIVE_INTERVAL = 2.0
+
+# Phase 3 live streaming. The default poll set is the roadmap's core dashboard
+# sensors; the cadence is the poll loop's target interval (the TUI's own timer).
+# RPM, coolant, throttle, MAP, O2 sensor 1, battery voltage.
+DEFAULT_LIVE_PIDS = (0x0C, 0x05, 0x11, 0x0B, 0x14, 0x42)
+DEFAULT_POLL_INTERVAL = 0.5
 
 
 class _Keepalive:
@@ -99,10 +106,12 @@ class DiagnosticService:
         logger: Optional[Logger] = None,
         protocol: str = PROTOCOL_AUTO,
         client: Optional[object] = None,
+        pids: Optional[PidDatabase] = None,
     ):
         self.transport = transport
         self.config = config
         self.db = db or DtcDatabase.load_default()
+        self.pids = pids or PidDatabase.load_default()
         self._logger = logger or (lambda _m: None)
         self.protocol = protocol
         self._explicit_client = client
@@ -269,6 +278,38 @@ class DiagnosticService:
         with self._io_lock:
             client = self._connect()
             client.clear_dtcs()
+
+    def read_live(
+        self, pids: Optional[Iterable[int]] = None
+    ) -> List[SensorReading]:
+        """Read one live-data snapshot (Phase 3): the requested PIDs' values.
+
+        Polls each PID once over the active session (connecting lazily if
+        needed), serialized on the half-duplex ``_io_lock`` like every other
+        operation, then decodes the raw bytes via the PID table into
+        :class:`SensorReading`s ordered as requested. A PID the ECU didn't
+        answer — or that the table can't decode — is dropped, so the returned
+        list may be shorter than ``pids``. Decoding runs outside the lock (it's
+        pure computation, no wire traffic). Meant to be called repeatedly by the
+        TUI's poll loop; ``None`` uses :data:`DEFAULT_LIVE_PIDS`.
+        """
+        requested = list(DEFAULT_LIVE_PIDS if pids is None else pids)
+        with self._io_lock:
+            client = self._connect()
+            read = getattr(client, "read_live", None)
+            if read is None:
+                return []
+            raw = read(requested)
+        readings: List[SensorReading] = []
+        for pid in requested:
+            data = raw.get(pid)
+            if data is None or pid not in self.pids:
+                continue
+            try:
+                readings.append(self.pids.decode(pid, data))
+            except (KeyError, FormulaError) as exc:
+                self._logger(f"live decode skipped for 0x{pid:02X}: {exc}")
+        return readings
 
     def __enter__(self) -> "DiagnosticService":
         self.open()

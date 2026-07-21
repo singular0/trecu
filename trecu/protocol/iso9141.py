@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..transport.base import Transport, TransportError
 from .kwp2000 import (
@@ -59,6 +59,7 @@ class Iso9141Config:
     init_retries: int = 4                  # slow-init can need a few tries
     retry_wait: float = 2.0                # settle time between init attempts
     id_timeout: float = 0.5                # per-PID wait for Mode 09 (often unsupported)
+    live_timeout: float = 0.4              # per-PID wait when polling Mode 01 live data
 
 
 class Iso9141Client:
@@ -226,6 +227,32 @@ class Iso9141Client:
             a = resp[2]
             return (bool(a & 0x80), a & 0x7F)
         return (False, 0)
+
+    def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
+        """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
+
+        One Mode 01 request per PID — widely supported and how TuneECU's live
+        display polls. A PID the ECU doesn't answer (timeout, wrong echo) is
+        simply omitted, so a partial dict is normal; the caller decodes whatever
+        came back via the shared PID table. Duck-typed peer of
+        :meth:`Kwp2000Client.read_live`.
+        """
+        out: Dict[int, bytes] = {}
+        for pid in pids:
+            try:
+                resp = self.obd_request(
+                    bytes((MODE_CURRENT_DATA, pid)), timeout=self.config.live_timeout
+                )
+            except ProtocolError:
+                continue
+            # payload: 41 <pid> <data...>
+            if (
+                len(resp) >= 3
+                and resp[0] == MODE_CURRENT_DATA + POSITIVE_OFFSET
+                and resp[1] == pid
+            ):
+                out[pid] = bytes(resp[2:])
+        return out
 
     def read_identification(self) -> EcuInfo:
         """Read ECU identity via OBD Mode 09 (VIN / Calibration ID / ECU name).

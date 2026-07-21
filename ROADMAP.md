@@ -28,8 +28,9 @@ Built and tested (31 tests, all against the mock ECUs):
   session) — the F1 foundation for everything continuous.
 - **Two mock ECUs**, one per protocol path, as the ground truth for tests.
 
-So **Phase 1 is done**, **Phase 2 is done**, and the **F1 foundation is done**
-(Phase 3 live-data streaming is now unblocked).
+So **Phase 1 is done**, **Phase 2 is done**, the **F1 foundation is done**, and
+**Phase 3 (live-data streaming) is done** on the confirmed OBD path — plus the
+first slice of **F2** (`triumph_pids.json`).
 
 ---
 
@@ -60,12 +61,19 @@ Delivered:
 The CLI stays one-shot (`--read`/`--clear` use `with service:`, no keepalive);
 the persistent session is the TUI/continuous path.
 
-### F2 — Model-value data files, not constants  · **S, incremental** · unlocks 3–7
+### F2 — Model-value data files, not constants  · **S, incremental** · unlocks 3–7 · **started**
 `data/triumph_dtc.json` is the pattern: model-specific values live in data, not
 code. Live-data PIDs/record layouts, actuator routine IDs, and memory maps are
 all model/ECU-specific in exactly the same way. Extend the `data/` +
 `@dataclass` config approach (per `CLAUDE.md`) rather than hardcoding — one file
 per concern (e.g. `triumph_pids.json`, `triumph_actuators.json`).
+
+Delivered: **`data/triumph_pids.json`** — the standardized OBD **Mode 01** PID
+set (name, group, unit, byte count, SAE J1979 formula, gauge bounds), loaded by
+the `PidDatabase` sensor-decode layer (`protocol/pids.py`). The top level is
+keyed by source (`obd_mode01`) so a model-specific `kwp_local` section can slot
+in without a loader change. Still to come (hardware-gated): the KWP record
+layouts and `triumph_actuators.json`.
 
 ### F3 — Security access (seed/key) spike  · **M, research** · gates 5, 6, 7
 KWP `SecurityAccess` (SID `0x27`: request seed → return computed key) almost
@@ -115,7 +123,7 @@ Both paths implemented, decoded, and tested (`test_iso9141_obd.py`,
 `test_mock_roundtrip.py`). Ongoing: extend `triumph_dtc.json` coverage as new
 model codes surface. No new architecture.
 
-## Phase 3 — Live sensor data streaming  · **L**  · needs F1 (+ F2)
+## Phase 3 — Live sensor data streaming  · **L**  · needs F1 (+ F2) · **done** (OBD path)
 
 **Goal:** continuously poll and display RPM, TPS, MAP, O2, coolant temp, battery
 voltage.
@@ -125,25 +133,32 @@ voltage.
 > the DTC list as one view among several (Dashboard / Live Data / Throttle Sync).
 > That redesign is the UI side of F1 and the front end for this phase and Phase 4.
 
-- **First real streaming feature** — this is where F1 (persistent session +
-  keepalive) becomes mandatory.
-- *Protocol:*
-  - `iso9141`: OBD **Mode 01** PIDs — 0C RPM, 05 coolant, 11 TPS, 0B MAP,
-    14/24… O2, 42 module voltage. Formulas are standardized (SAE J1979).
-  - `kwp`: **ReadDataByLocalIdentifier** (SID `0x21`) / ByCommonIdentifier
-    (`0x22`) — Triumph packs sensors into model-specific record layouts (this is
-    what TuneECU's live display reads).
-- **Seam:** a new **sensor-decode layer** (PID/record → name, unit, formula),
-  data-driven per F2; a `read_live(pids)` service method; a poll loop.
-- **UI:** new live view (updating table or gauges). TUI threading changes — a
-  repeating poll via `set_interval` feeding a `@work` reader, not the one-shot
-  worker used for DTCs.
-- **Mocks:** both ECUs must answer PID/record requests with plausible, *varying*
-  values so the stream visibly moves.
-- **Config/tests:** poll interval + PID list in config; pure formula unit tests +
-  mock round-trip per PID.
-- **Risk:** medium. Standard OBD PIDs are safe/known; KWP record layouts are
-  model-specific (needs F2 + hardware capture).
+Delivered:
+
+- **Sensor-decode layer** (`protocol/pids.py`): `PidDatabase` +
+  `SensorReading`, formulas evaluated by a restricted interpreter (no `eval`),
+  backed by `triumph_pids.json` (F2).
+- **`read_live(pids)`** on both duck-typed clients and on `DiagnosticService`
+  (serialized on `_io_lock`, decodes to ordered `SensorReading`s). Defaults:
+  `DEFAULT_LIVE_PIDS` (RPM, coolant, TPS, MAP, O2, battery) + `DEFAULT_POLL_INTERVAL`.
+  - `iso9141`: one OBD **Mode 01** request per PID — standardized (SAE J1979),
+    the confirmed path.
+  - `kwp`: **ReadDataByLocalIdentifier** (SID `0x21`) — implemented against a
+    **placeholder** 1:1 id→record mapping; real Triumph record layouts are
+    model-specific (needs hardware capture, F4).
+- **Poll loop UI**: a **Live Data** tab (streaming table with running min/max +
+  trend sparklines) driven by a `set_interval` timer that resumes only while the
+  tab is active and kicks a `@work(group="live")` reader; `space` freezes it.
+- **Mocks** answer live requests with plausible *moving* values from one shared
+  generator (`transport/_mock_live.py`).
+- **CLI** `--live` (headless one-shot snapshot). Tests in `test_pids.py` +
+  `test_live.py` (formula eval, both client paths, service decode/ordering, mock
+  movement, TUI poll loop).
+
+**Still ahead / deferred niceties** (not blocking Phase 4): user-driven PID
+selection, CSV record, adjustable poll rate, a Dashboard gauge cluster, and the
+real KWP record layouts (F4). Effective K-line OBD poll rate is ~1–2 Hz (each
+PID is a separate paced round-trip), not the aspirational 6 Hz in the mockups.
 
 ## Phase 4 — Throttle body sync display  · **M**  · needs Phase 3
 

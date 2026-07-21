@@ -14,6 +14,7 @@ from ..protocol.framing import (
     build_frame,
     parse_frame,
 )
+from ._mock_live import sensor_data
 from .base import Transport
 
 # Default set of "stored" faults, as (dtc_high, dtc_low, status) triples.
@@ -55,6 +56,7 @@ class MockKLineTransport(Transport):
         self._rx = bytearray()      # bytes waiting for the client to read
         self._open = False
         self._connected = False
+        self._live_tick = 0  # advances each live-data read so values move (Phase 3)
 
     # -- Transport interface -------------------------------------------------
     def open(self) -> None:
@@ -118,6 +120,17 @@ class MockKLineTransport(Transport):
             if data is None:
                 return bytes((0x7F, 0x1A, 0x31))  # requestOutOfRange
             return bytes((0x5A, rli)) + data
+
+        if sid == 0x21:  # ReadDataByLocalIdentifier (live data, Phase 3)
+            # Placeholder 1:1 id->record layout mirroring the OBD mock's PIDs;
+            # real Triumph records pack several sensors per model-specific id
+            # (roadmap F4). See Kwp2000Client.read_live.
+            lid = payload[1] if len(payload) > 1 else 0
+            data = sensor_data(lid, self._live_tick)
+            if data is None:
+                return bytes((0x7F, 0x21, 0x31))  # requestOutOfRange
+            self._live_tick += 1
+            return bytes((0x61, lid)) + data
 
         if sid == 0x18:  # ReadDTCByStatus
             body = bytearray((0x58, len(self._dtcs)))

@@ -15,10 +15,11 @@ read it before touching the protocol layer.
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (31 tests, ~10s, no hardware)
+./.venv/bin/python -m pytest              # full suite (58 tests, ~15s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
 ./.venv/bin/trecu --mock --read           # headless read + print + exit
+./.venv/bin/trecu --mock --live           # headless live-sensor snapshot + exit
 ./.venv/bin/trecu --list-ports            # find a real cable's /dev/cu.usbserial-*
 ```
 
@@ -43,8 +44,15 @@ Transport (transport/base.py)    ← half-duplex byte pipe: serial or mock
 
 **The two protocol clients are duck-typed peers, not a class hierarchy.** Both
 expose `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
-`read_identification() -> EcuInfo`, `clear_dtcs()`, `keepalive()`, and
-`stop_communication()`. `keepalive()` holds a persistent session open (F1):
+`read_identification() -> EcuInfo`, `read_live(pids) -> dict[pid, data_bytes]`,
+`clear_dtcs()`, `keepalive()`, and `stop_communication()`. `read_live()` polls
+live sensors (Phase 3): iso9141 sends one OBD **Mode 01** request per PID; KWP
+uses **ReadDataByLocalIdentifier** (0x21). Both return *raw* data bytes per PID
+(a PID the ECU doesn't answer is simply omitted) — decoding to physical values
+is the service's job via the sensor-decode layer, not the client's. The KWP
+`read_live` maps each id 1:1 to a single record as a **placeholder**; real
+Triumph records pack several sensors per model-specific id and await a hardware
+capture (F4). `keepalive()` holds a persistent session open (F1):
 KWP sends `TesterPresent` (0x3E, response suppressed), iso9141 has no such
 service so it pokes the link with a cheap read-only Mode 01 PID 00.
 `read_identification()` is best-effort (OBD Mode 09 / KWP ReadEcuIdentification
@@ -87,6 +95,11 @@ real bike observed over the cable: 5-baud init, key bytes `08 08`, one stored
 that client, update this mock to match and vice versa. Both mocks also serve
 **placeholder** ECU identity (Mode 09 / RLI records) so identification is
 testable — those VIN/calibration strings are invented, not real-bike facts.
+Both also answer **live-data** requests (Phase 3) with plausible, *moving*
+values, drawn from one shared generator (`transport/_mock_live.py`) so the two
+protocol paths behave identically; its byte encoders are the inverse of the
+`triumph_pids.json` formulas — keep them in sync. An unmodelled PID gets no
+reply, like a real ECU, so `read_live` omits it.
 
 **KWP2000 framing (`protocol/framing.py`) is pure and transport-independent** —
 build/parse ISO 14230 frames, checksum, incremental length hints. Test it in
@@ -97,6 +110,20 @@ J2012 codes (`P/C/B/U` + 4 hex) and looks up descriptions in
 `data/triumph_dtc.json`. Generic `P0xxx` codes are standardized; `P1xxx`/`P2xxx`
 are Triumph-specific and vary by model/year — extend the JSON, don't hardcode.
 
+**Sensor decoding (`protocol/pids.py`)** is the Phase 3 parallel to `dtc.py`: it
+turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using the
+model-value table in `data/triumph_pids.json` (F2). Each PID carries a **formula**
+— an expression over the data bytes `A, B, C, D` (A = first byte, big-endian) as
+SAE J1979 writes it — evaluated by a tiny arithmetic interpreter (`compile_formula`)
+restricted to `+ - * /`, unary sign, parens, and those four names; **never Python
+`eval`**. A bad formula raises `FormulaError` at *load*, not mid-poll. The
+`obd_mode01` section holds the standardized OBD PIDs (the confirmed path); the
+file is structured so a future model-specific `kwp_local` section slots in without
+touching the loader. `DiagnosticService.read_live(pids=None)` runs a client's
+`read_live` under `_io_lock`, then decodes the raw bytes into ordered
+`SensorReading`s (dropping any PID the ECU didn't answer or the table can't
+decode); `None` uses `DEFAULT_LIVE_PIDS`.
+
 **TUI layout (`tui/app.py`) is a one-row session "spine" over a
 `TabbedContent` body.** The spine shows the brand on the left and, right-aligned,
 a colored liveness dot + state label (`ready`/`connecting`/`reading`/`clearing`/
@@ -104,9 +131,11 @@ a colored liveness dot + state label (`ready`/`connecting`/`reading`/`clearing`/
 that lights only when the last read found stored faults. The body has three
 tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
 identity), **Faults** (the DTC `DataTable` with a centered "no faults" empty
-state), and **Log** (the raw protocol `RichLog`; error lines are red, and the
-app auto-switches here under `-v` and on error). Footer bindings are *contextual*
-via `check_action`: `r` Read shows on Dashboard/Faults, `c` Clear on Faults only;
+state), **Live Data** (the Phase 3 streaming `DataTable` — sensor / value / unit
+/ running min / max / trend sparkline), and **Log** (the raw protocol `RichLog`;
+error lines are red, and the app auto-switches here under `-v` and on error).
+Footer bindings are *contextual* via `check_action`: `r` Read shows on
+Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
 own arrow bindings are hidden). **The session is now mechanism, not just framing
 (roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
@@ -114,12 +143,20 @@ lazily on the first read (`_ensure_session`), connected once and held open with
 a background keepalive ticker; re-reads and clears reuse it instead of
 re-initialising the K-line per keypress. A failed operation tears the session
 down (`_close_session`) so the next read reconnects cleanly; `on_unmount` closes
-it on exit. The spine shows a green `⚡` keepalive lamp while a session is live.
+it on exit. The spine shows a green `⚡` keepalive lamp while a session is live,
+and reads `streaming N sensors` (or `frozen`) while the Live Data poll loop runs.
 
 **TUI threading:** Textual is async but the protocol stack is blocking. The app
 runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the
 protocol logger uses `call_from_thread` to marshal log lines back to the UI
 thread. Don't call blocking transport code directly on the event loop.
+**Live-data polling (Phase 3)** is a `set_interval` timer created paused and
+resumed only while the Live Data tab is active (`_sync_live_polling` — the
+"active view *is* what the session is doing" model); each tick kicks a
+`@work(group="live")` reader (guarded by `_live_busy` so ticks can't stack) that
+calls `read_live` off-thread. It replaces nothing — the one-shot Read worker
+(`group="ecu"`) still handles DTCs — but both funnel through the service's
+`_io_lock`, so a poll and a Read serialize on the single wire.
 
 ## Protocol values vary by model — this is a real constraint
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..transport.base import Transport, TransportError
 from .framing import (
@@ -33,6 +33,7 @@ SID_TESTER_PRESENT = 0x3E
 SID_CLEAR_DIAGNOSTIC_INFO = 0x14
 SID_READ_DTC_BY_STATUS = 0x18
 SID_READ_ECU_IDENTIFICATION = 0x1A
+SID_READ_DATA_BY_LOCAL_ID = 0x21
 
 POSITIVE_RESPONSE_OFFSET = 0x40
 NEGATIVE_RESPONSE = 0x7F
@@ -332,6 +333,29 @@ class Kwp2000Client:
                 f"note: ECU reported {count} DTCs, parsed {len(triples)} triples"
             )
         return triples
+
+    def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
+        """Poll live data via ReadDataByLocalIdentifier (SID 0x21).
+
+        Duck-typed peer of :meth:`Iso9141Client.read_live`. **Placeholder record
+        mapping:** each requested id is read as a single RDBLI record and its
+        data bytes returned as-is, decoded by the shared PID table. Real Triumph
+        ECUs pack *several* sensors into each model-specific record layout (see
+        TuneECU) — those layouts aren't in this codebase and await a hardware
+        capture (roadmap F4). The 1:1 id->record convention here keeps this path
+        exercisable against the mock and symmetric with the OBD path. A record
+        the ECU rejects (negative response) is omitted.
+        """
+        out: Dict[int, bytes] = {}
+        for pid in pids:
+            try:
+                resp = self.request(bytes((SID_READ_DATA_BY_LOCAL_ID, pid)))
+            except ProtocolError:
+                continue
+            # response: 61 <lid> <data...>
+            if len(resp) >= 3 and resp[1] == pid:
+                out[pid] = bytes(resp[2:])
+        return out
 
     def read_identification(self) -> EcuInfo:
         """Read ECU identity via ReadEcuIdentification (best-effort per record).

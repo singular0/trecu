@@ -47,6 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     action = p.add_argument_group("actions (default: launch the TUI)")
     action.add_argument("-l", "--list-ports", action="store_true", help="list serial ports and exit")
     action.add_argument("-r", "--read", action="store_true", help="read codes once, print them, and exit (no TUI)")
+    action.add_argument("--live", action="store_true", help="read one live-data (sensor) snapshot, print it, and exit (no TUI)")
     action.add_argument("-c", "--clear", action="store_true", help="clear stored codes and exit")
     action.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation on --clear")
     action.add_argument("-v", "--verbose", action="store_true", help="print the raw KWP2000 byte traffic")
@@ -171,6 +172,40 @@ def _cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_live(readings) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    if not readings:
+        console.print("[yellow]No live data reported by this ECU.[/yellow]")
+        return
+    table = Table(title="Live data snapshot")
+    table.add_column("Sensor")
+    table.add_column("Value", justify="right", style="bold cyan")
+    table.add_column("Unit")
+    table.add_column("Range", style="dim")
+    for r in readings:
+        table.add_row(r.name, r.formatted(), r.unit, f"{r.min:g}–{r.max:g}")
+    console.print(table)
+
+
+def _cmd_live(args: argparse.Namespace) -> int:
+    logger = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+    transport = _make_transport(args)
+    service = DiagnosticService(
+        transport, _make_config(args), _load_db(args), logger, protocol=args.protocol
+    )
+    try:
+        with service:
+            readings = service.read_live()
+    except (TransportError, ProtocolError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    _print_live(readings)
+    return 0
+
+
 def _cmd_clear(args: argparse.Namespace) -> int:
     if not args.yes:
         reply = input("Clear all stored fault codes? [y/N] ").strip().lower()
@@ -250,6 +285,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _cmd_clear(args)
     if args.read:
         return _cmd_read(args)
+    if args.live:
+        return _cmd_live(args)
     return _cmd_tui(args)
 
 

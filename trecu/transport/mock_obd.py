@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+from ._mock_live import sensor_data
 from .base import Transport, TransportError
 
 # Default stored fault: 0x1108 -> P1108 (ambient air pressure sensor).
@@ -43,6 +44,7 @@ class MockObdTransport(Transport):
         self._vehicle_info = {0x02: vin, 0x04: calibration_id, 0x0A: ecu_name}
         self._rx = bytearray()
         self._await_inv = False
+        self._live_tick = 0  # advances each live-PID read so values move (Phase 3)
 
     # -- Transport interface -------------------------------------------------
     def open(self) -> None:
@@ -98,7 +100,14 @@ class MockObdTransport(Transport):
             elif pid == 0x00:  # supported PIDs
                 self._emit(bytes((0x41, 0x00, 0xBD, 0x36, 0x91, 0x10)))
             else:
-                self._emit(bytes((0x41, pid, 0x00, 0x00, 0x00, 0x00)))
+                # Live sensor PIDs (Phase 3): reply with plausible, moving data.
+                # An unmodelled PID gets no reply, like a real ECU ignoring an
+                # unsupported PID — so read_live omits it rather than surfacing a
+                # bogus zero.
+                data = sensor_data(pid, self._live_tick)
+                if data is not None:
+                    self._live_tick += 1
+                    self._emit(bytes((0x41, pid)) + data)
         elif mode == 0x03:  # stored DTCs
             body = bytearray((0x43,))
             slots = list(self._dtcs)

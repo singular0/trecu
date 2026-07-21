@@ -1,13 +1,14 @@
 # TUI: the tabbed session shell, and where it's headed
 
-Status: the **tabbed session *shell* is built** (`tui/app.py`) and so is the
+Status: the **tabbed session *shell* is built** (`tui/app.py`), so is the
 **persistent-session backend** (roadmap F1 — the app now holds one long-lived
-connection with a keepalive ticker; see below). The live-data / actuator views
-the shell is shaped for are still ahead. This doc records both — what ships
-today, and the direction that shaped it. It is the UI side of roadmap **F1**
-(persistent session + `TesterPresent` keepalive) and the front end for **Phase
-3** (live sensor streaming) and **Phase 4** (throttle sync). See `ROADMAP.md`
-for the layer plan and `CLAUDE.md` for the four architectural seams.
+connection with a keepalive ticker), and so is the **Live Data view + poll loop**
+(roadmap Phase 3 — see "Live Data" below). The actuator/throttle views the shell
+is shaped for are still ahead. This doc records both — what ships today, and the
+direction that shaped it. It is the UI side of roadmap **F1** (persistent session
++ `TesterPresent` keepalive) and the front end for **Phase 3** (live sensor
+streaming, now built) and **Phase 4** (throttle sync). See `ROADMAP.md` for the
+layer plan and `CLAUDE.md` for the four architectural seams.
 
 ## The core reframe (the direction)
 
@@ -32,12 +33,12 @@ UI's mental model:
 
 > **The active view *is* what the ECU session is doing right now.**
 
-The session is now held open on keepalive between operations (F1), but the
-*views* don't yet retask it continuously — that's the poll loop (Phase 3). Once
-it exists, switching to **Live Data** streams PIDs; switching to **Faults**
-pauses the stream, reads DTCs, then idles on keepalive; **Actuators** (later)
-commands outputs. One wire, one activity, mirrored by one visible tab —
-switching views *retasks the ECU*.
+The session is held open on keepalive between operations (F1), and the poll loop
+(Phase 3) now makes the *active view retask the ECU* literally true: switching to
+**Live Data** resumes a `set_interval` poll that streams PIDs; leaving it pauses
+the stream (`_sync_live_polling`); **Faults** reads DTCs then idles on keepalive;
+**Actuators** (later) commands outputs. One wire, one activity, mirrored by one
+visible tab — switching views *retasks the ECU*.
 
 ## What's built today
 
@@ -124,13 +125,17 @@ operation and every keepalive beat on the single wire.
 that make the *active view retasks the ECU* model literally true. F1 is the
 lifecycle those sit on; the poll loop replaces the one-shot `@work` reader.
 
-## Planned views (not built)
+## Views
 
-These stay as the target the shell was shaped for. Value + unit + running
-min/max + trend sparkline per PID; user-driven PID selection; freeze + CSV
-record.
+### Live Data — the centerpiece — **built** (Phase 3)
 
-### Live Data — the centerpiece
+Value + unit + running min/max + trend sparkline per PID is **shipped**, driven
+by the `set_interval` poll loop over `DiagnosticService.read_live`; `space`
+freezes the stream and the spine reads `streaming N sensors` / `frozen`. Still
+open from the mockup below: user-driven PID selection (`p`), CSV record (`R`),
+and adjustable rate (`+/-`) — deferred, not blocking Phase 4. (The mockup's
+"6 Hz" is aspirational; K-line OBD polls each PID as a separate paced round-trip,
+so the real cadence is ~1–2 Hz.)
 
 ```
 ┌ TrECU ─────────────────────────────  polling 8 PIDs @ 6 Hz  ⚡keepalive ┐

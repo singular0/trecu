@@ -5,8 +5,10 @@ motorcycles** over a cheap **KKL (FT232RL) K-line cable**.
 
 It talks to the ECU over the K-line using either of the two protocols Triumphs
 use, identifies the ECU (VIN / calibration / part), reads stored Diagnostic
-Trouble Codes (DTCs), decodes them to human-readable descriptions, and lets you
-clear them — all from a keyboard-driven terminal UI.
+Trouble Codes (DTCs), decodes them to human-readable descriptions, lets you
+clear them, and **streams live sensor data** (RPM, coolant, throttle, MAP, O2,
+battery voltage) in a continuously-updating table — all from a keyboard-driven
+terminal UI.
 
 Two protocol paths, auto-detected by default:
 
@@ -68,7 +70,11 @@ Try it with **no hardware** using the simulated ECU:
 ```bash
 trecu --mock                 # launch the TUI against a fake ECU
 trecu --mock --read          # headless: print codes and exit
+trecu --mock --live          # headless: print a live-sensor snapshot and exit
 ```
+
+In the TUI, the **Live Data** tab streams sensor values (value · unit · running
+min/max · trend sparkline); `space` freezes the stream, `←`/`→` switch tabs.
 
 With a real cable:
 
@@ -76,6 +82,7 @@ With a real cable:
 trecu --list-ports           # find your /dev/cu.usbserial-XXXX
 trecu --port /dev/cu.usbserial-A1B2C3   # launch the TUI
 trecu --port /dev/cu.usbserial-A1B2C3 --read -v   # one-shot read + raw traffic
+trecu --port /dev/cu.usbserial-A1B2C3 --live      # one-shot live-sensor snapshot
 trecu --port /dev/cu.usbserial-A1B2C3 --clear     # clear codes (asks first)
 ```
 

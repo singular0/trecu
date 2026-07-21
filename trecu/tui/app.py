@@ -9,8 +9,9 @@ live-data / throttle-sync tabs slot in later.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from rich.text import Text
 from textual import work
@@ -30,9 +31,39 @@ from textual.widgets import (
 )
 
 from ..protocol.dtc import DtcDatabase
-from ..service import DEFAULT_KEEPALIVE_INTERVAL, DiagnosticService, ReadResult
+from ..protocol.pids import PidDatabase, SensorReading
+from ..service import (
+    DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_LIVE_PIDS,
+    DEFAULT_POLL_INTERVAL,
+    DiagnosticService,
+    ReadResult,
+)
 from ..transport.base import Transport
 from .port_select import PortSelectScreen
+
+# Trend sparkline: history length per PID and the block ramp used to draw it.
+_HISTORY = 24
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _fmt_value(v: float) -> str:
+    """Compact numeric string for the live table (integers stay whole)."""
+    v = round(v, 2)
+    return str(int(v)) if v == int(v) else f"{v:g}"
+
+
+def _sparkline(values) -> str:
+    """Render a value history as unicode block glyphs, autoscaled to its range."""
+    vals = list(values)
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    if hi <= lo:
+        return _SPARK[3] * len(vals)  # flat line -> a mid-level bar
+    span = hi - lo
+    steps = len(_SPARK) - 1
+    return "".join(_SPARK[round((v - lo) / span * steps)] for v in vals)
 
 TransportFactory = Callable[[], Transport]
 PortLister = Callable[[], list]
@@ -122,6 +153,8 @@ class TrecuApp(App):
     }
     #dtcs { height: 1fr; }
     #dtcs > .datatable--cursor { background: $accent; }
+    #live { height: 1fr; }
+    #live > .datatable--cursor { background: $accent; }
     #empty {
         height: 1fr;
         content-align: center middle;
@@ -135,6 +168,7 @@ class TrecuApp(App):
     BINDINGS = [
         Binding("r", "read", "Read"),
         Binding("c", "clear", "Clear"),
+        Binding("space", "toggle_freeze", "Freeze"),
         # TabbedContent's own left/right bindings switch tabs but are hidden
         # (show=False). Re-declare them at app level with priority so they win
         # the binding chain and appear in the footer.
@@ -155,15 +189,21 @@ class TrecuApp(App):
         protocol: str = "auto",
         verbose: bool = False,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
+        pids: Optional[PidDatabase] = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        live_pids: Optional[List[int]] = None,
     ):
         super().__init__()
         self._transport_factory = transport_factory
         self._config = config
         self._db = db or DtcDatabase.load_default()
+        self._pids = pids or PidDatabase.load_default()
         self._mock = mock
         self._protocol = protocol
         self._verbose = verbose
         self._keepalive_interval = keepalive_interval
+        self._poll_interval = poll_interval
+        self._live_pids = list(live_pids) if live_pids is not None else list(DEFAULT_LIVE_PIDS)
         self._port = port or ("mock ECU" if mock else None)
         # Used only when no port is known yet and the user must choose one.
         self._list_ports = list_ports
@@ -174,6 +214,14 @@ class TrecuApp(App):
         # keepalive ticker — reused across reads/clears instead of the old
         # connect-per-keypress model. Built lazily on the first read.
         self._session: Optional[DiagnosticService] = None
+        # Phase 3 live streaming: a paused poll timer (started on entering the
+        # Live Data tab), a re-entrancy guard, per-PID running stats + history,
+        # and a manual freeze toggle. `_streaming` drives the spine label.
+        self._live_timer = None
+        self._live_busy = False
+        self._live_frozen = False
+        self._streaming = False
+        self._live_stats: dict = {}
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -189,6 +237,8 @@ class TrecuApp(App):
             with TabPane("Faults", id="tab-faults"):
                 yield DataTable(id="dtcs", zebra_stripes=True)
                 yield Static("✓  No stored fault codes", id="empty")
+            with TabPane("Live Data", id="tab-live"):
+                yield DataTable(id="live", zebra_stripes=True)
             with TabPane("Log", id="tab-log"):
                 yield RichLog(id="log", markup=False, wrap=True, highlight=False)
         yield Footer()
@@ -197,6 +247,15 @@ class TrecuApp(App):
         table = self.query_one("#dtcs", DataTable)
         table.cursor_type = "row"
         table.add_columns("Code", "Status", "Subsystem", "Description")
+        live = self.query_one("#live", DataTable)
+        live.cursor_type = "row"
+        live.add_columns("Sensor", "Value", "Unit", "Min", "Max", "Trend")
+        # Phase 3 poll loop: a repeating timer, created paused and resumed only
+        # while the Live Data tab is active (see _sync_live_polling). It kicks a
+        # background reader rather than touching the wire on the event loop.
+        self._live_timer = self.set_interval(
+            self._poll_interval, self._poll_live, pause=True
+        )
         self.query_one("#card-faults", Static).border_title = "Faults"
         self.query_one("#card-connection", Static).border_title = "Connection"
         self.query_one("#card-identity", Static).border_title = "ECU identity"
@@ -229,10 +288,16 @@ class TrecuApp(App):
 
     def _refresh_spine(self) -> None:
         color, dot, label = _SPINE.get(self._state, _SPINE["ready"])
+        # While the poll loop is running, the spine reports what the session is
+        # actually doing: streaming N sensors (or frozen on the last snapshot).
+        if self._streaming and self._state == "connected":
+            n = len(self._live_pids)
+            label = "frozen" if self._live_frozen else f"streaming {n} sensors"
         # Synthetic MIL lamp: red dot only when the ECU reports stored faults.
         mil = "[red]●[/]  " if (self._last and self._last.count) else ""
         # Keepalive lamp: the session is held open by a TesterPresent ticker.
-        ka = "[green]⚡[/] " if (self._session is not None and self._state == "connected") else ""
+        live_or_conn = self._state == "connected" or self._streaming
+        ka = "[green]⚡[/] " if (self._session is not None and live_or_conn) else ""
         conn = f"{mil}{ka}[{color}]{dot}[/] [b]{label}[/]"
         self.query_one("#conn", Static).update(Text.from_markup(conn))
 
@@ -273,6 +338,10 @@ class TrecuApp(App):
     ) -> None:
         # Read/Clear are tab-specific; refresh the footer when the tab changes.
         self.refresh_bindings()
+        # Switching *to* Live Data retasks the ECU to streaming; leaving it
+        # pauses the poll loop (the half-duplex "active view is what the session
+        # is doing" model — see docs/tui-redesign.md).
+        self._sync_live_polling()
 
     def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
         """Gate Read/Clear to the tabs where they make sense (hide elsewhere).
@@ -282,14 +351,16 @@ class TrecuApp(App):
         ``None``, which would merely dim it) removes the binding from the footer
         and makes the key inert on other tabs.
         """
-        if action in ("read", "clear"):
+        if action in ("read", "clear", "toggle_freeze"):
             try:
                 active = self.query_one(TabbedContent).active
             except Exception:
                 return True
             if action == "read":
                 return active in ("tab-dashboard", "tab-faults")
-            return active == "tab-faults"
+            if action == "clear":
+                return active == "tab-faults"
+            return active == "tab-live"  # freeze only makes sense while streaming
         return True
 
     # -- persistent session (F1) ---------------------------------------------
@@ -304,6 +375,7 @@ class TrecuApp(App):
                 self._db,
                 self._logger,
                 protocol=self._protocol,
+                pids=self._pids,
             )
             svc.start_session(self._keepalive_interval)
             self._session = svc
@@ -323,6 +395,95 @@ class TrecuApp(App):
 
     def _session_clear(self) -> None:
         self._ensure_session().clear_faults()
+
+    def _session_read_live(self) -> List[SensorReading]:
+        return self._ensure_session().read_live(self._live_pids)
+
+    # -- live streaming (Phase 3) --------------------------------------------
+    def _sync_live_polling(self) -> None:
+        """Resume the poll loop only while the Live Data tab is active."""
+        if self._live_timer is None:
+            return
+        try:
+            active = self.query_one(TabbedContent).active
+        except Exception:
+            return
+        if active == "tab-live" and self._transport_factory is not None:
+            self._live_frozen = False
+            self._reset_live_table()
+            self._live_timer.resume()
+        else:
+            self._live_timer.pause()
+            if self._streaming:
+                self._streaming = False
+                self._refresh_spine()
+
+    def _reset_live_table(self) -> None:
+        """Clear the table + per-PID history for a fresh streaming session."""
+        self._live_stats = {}
+        self.query_one("#live", DataTable).clear()
+
+    def action_toggle_freeze(self) -> None:
+        """Pause/resume the live stream in place (keeps the last snapshot)."""
+        self._live_frozen = not self._live_frozen
+        self._append_log("live stream " + ("frozen" if self._live_frozen else "resumed"))
+        self._refresh_spine()
+
+    def _poll_live(self) -> None:
+        """Timer tick: kick a background live read unless one is in flight."""
+        if self._live_busy or self._live_frozen:
+            return
+        if self._transport_factory is None:
+            return
+        try:
+            if self.query_one(TabbedContent).active != "tab-live":
+                return
+        except Exception:
+            return
+        # Claim the guard synchronously so a second tick can't also launch a
+        # reader before the worker starts (the event loop is single-threaded).
+        self._live_busy = True
+        self._do_poll_live()
+
+    @work(group="live")
+    async def _do_poll_live(self) -> None:
+        if self._session is None:
+            self._set_state("connecting")
+        try:
+            readings = await asyncio.to_thread(self._session_read_live)
+        except Exception as exc:  # transport/protocol errors surface here
+            self._live_busy = False
+            await asyncio.to_thread(self._close_session)  # reconnect on next entry
+            self._on_error(exc)
+            return
+        self._live_busy = False
+        self._update_live_table(readings)
+        self._streaming = True
+        if self._state != "connected":
+            self._set_state("connected")
+        else:
+            self._refresh_spine()
+
+    def _update_live_table(self, readings: List[SensorReading]) -> None:
+        table = self.query_one("#live", DataTable)
+        table.clear()  # keeps columns; re-add the (few) rows each snapshot
+        for r in readings:
+            st = self._live_stats.get(r.pid)
+            if st is None:
+                st = {"min": r.value, "max": r.value, "hist": deque(maxlen=_HISTORY)}
+                self._live_stats[r.pid] = st
+            st["min"] = min(st["min"], r.value)
+            st["max"] = max(st["max"], r.value)
+            st["hist"].append(r.value)
+            table.add_row(
+                r.name,
+                r.formatted(),
+                r.unit,
+                _fmt_value(st["min"]),
+                _fmt_value(st["max"]),
+                _sparkline(st["hist"]),
+                key=str(r.pid),
+            )
 
     # -- rendering results ---------------------------------------------------
     def _populate(self, result: ReadResult) -> None:
