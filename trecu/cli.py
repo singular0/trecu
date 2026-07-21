@@ -25,7 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Read and decode Triumph motorcycle ECU fault codes over a "
         "KKL (FT232RL) K-line cable.",
     )
-    p.add_argument("--version", action="version", version=f"trecu {__version__}")
+    p.add_argument("--version", action="version", version=f"TrECU {__version__}")
 
     conn = p.add_argument_group("connection")
     conn.add_argument("-p", "--port", help="serial port (e.g. /dev/cu.usbserial-XXXX)")

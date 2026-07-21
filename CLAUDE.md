@@ -7,8 +7,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `trecu` is a macOS TUI (Textual) that reads and decodes ECU fault codes (DTCs)
 from Triumph motorcycles over a cheap KKL / FT232RL K-line cable. It speaks the
 two protocols Triumphs use, decodes DTCs per SAE J2012, and can clear them.
-`README.md` documents the user-facing behavior and the K-line protocol details;
-read it before touching the protocol layer.
+`README.md` is the user-facing guide; the byte-level K-line handshake lives in
+the **K-line protocol reference** section below — read it before touching the
+protocol layer.
+
+The KWP2000 framing, fast-init, DTC services, and SAE J2012 decoding are all
+hand-rolled here on purpose: a KKL cable is a *dumb* FTDI serial adapter, **not**
+an ELM327, so `python-OBD` does not apply, and there is no maintained general
+Python KWP2000 client for a raw K-line. Dependencies are kept small and to
+well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
+(formatting, via textual), `pyserial` (FT232RL VCP access), and optional
+`pyftdi` (direct FTDI/libusb bit-bang init).
 
 ## Commands
 
@@ -109,6 +118,9 @@ isolation; it has no I/O.
 J2012 codes (`P/C/B/U` + 4 hex) and looks up descriptions in
 `data/triumph_dtc.json`. Generic `P0xxx` codes are standardized; `P1xxx`/`P2xxx`
 are Triumph-specific and vary by model/year — extend the JSON, don't hardcode.
+The bundled DB covers the standardized generics plus Triumph codes sourced from
+official service manuals (Daytona 675, Thunderbird, Street Twin); an unknown code
+still decodes structurally and shows a generic message.
 
 **Sensor decoding (`protocol/pids.py`)** is the Phase 3 parallel to `dtc.py`: it
 turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using the
@@ -169,10 +181,37 @@ it to the config rather than inlining a constant.
 
 ## Known real-hardware facts (from a live bike, not derivable from code)
 
-- The tester's bike is on `/dev/cu.usbserial-3` and is a **Sagem-style ECU
-  requiring 5-baud SLOW init** (fast-init gets no data). After the handshake it
-  speaks **standard OBD-II over ISO 9141-2** (header `68 6A F1` out / `48 6B D1`
-  in), not proprietary KWP — hence `iso9141` is the default `auto` first choice.
+- The tester's bike — a **Triumph Bonneville 865 EFI (2009)**, the *only* bike
+  trecu has been tested against — is on `/dev/cu.usbserial-3` and is a
+  **Sagem-style ECU requiring 5-baud SLOW init** (fast-init gets no data). After
+  the handshake it speaks **standard OBD-II over ISO 9141-2** (header `68 6A F1`
+  out / `48 6B D1` in), not proprietary KWP — hence `iso9141` is the default
+  `auto` first choice.
 - Live-confirmed read: one stored `P1108` (ambient-pressure sensor) with MIL on.
 - The ECU needs a few seconds to settle between back-to-back 5-baud init
   attempts; `Iso9141Client` retries (`init_retries`, `retry_wait`) cover this.
+
+## K-line protocol reference
+
+The single-wire K-line **echoes** everything the tester transmits; the client
+discards that echo before parsing (see the `echoes` transport flag). Each DTC is
+decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
+`data/triumph_dtc.json`. Two paths, auto-tried `iso9141` then `kwp-fast`:
+
+**ISO 9141-2 + OBD (`iso9141`, the confirmed Triumph case):**
+
+1. **5-baud slow init** at address `0x33` → ECU replies with sync `0x55` + key
+   bytes; the tester answers with the inverted key byte and the ECU returns the
+   inverted address. Session open.
+2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name).
+3. **Mode 03** (`68 6A F1 03`) → stored DTCs; **Mode 07** → pending; **Mode 01
+   PID 01** → MIL status + count.
+4. **Mode 01** per PID → live sensor data (Phase 3); **Mode 04** → clear codes.
+
+**KWP2000 fast path (`kwp-fast`):**
+
+1. **Fast-init** (K-line low 25 ms / high 25 ms via the UART break) →
+   **StartCommunication** (`0x81`) → key bytes → **ReadEcuIdentification**
+   (`0x1A`) for VIN/part/version → **ReadDTCByStatus** (`0x18`);
+   **ReadDataByLocalIdentifier** (`0x21`) for live data;
+   **ClearDiagnosticInformation** (`0x14`) to clear.

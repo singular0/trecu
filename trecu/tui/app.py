@@ -2,8 +2,9 @@
 
 The UI is a persistent *session* (a status "spine") over a set of tabbed views:
 a **Dashboard** (faults + ECU identity cards), the **Fault Codes** table, and
-the raw protocol **Log**. See ``docs/tui-redesign.md`` for the concept and how
-live-data / throttle-sync tabs slot in later.
+the raw protocol **Log**. See the "TUI: the tabbed session shell" section of
+``ROADMAP.md`` for the concept and how live-data / throttle-sync tabs slot in
+later.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from textual.widgets import (
     TabPane,
 )
 
+from .. import __version__
 from ..protocol.dtc import DtcDatabase
 from ..protocol.pids import PidDatabase, SensorReading
 from ..service import (
@@ -126,7 +128,7 @@ class ConfirmScreen(ModalScreen[bool]):
 class TrecuApp(App):
     """Read and decode Triumph ECU fault codes."""
 
-    TITLE = "trecu"
+    TITLE = "TrECU"
     SUB_TITLE = "Triumph ECU fault-code reader"
 
     CSS = """
@@ -136,7 +138,7 @@ class TrecuApp(App):
         background: $panel;
         color: $text;
     }
-    #brand { width: auto; text-style: bold; }
+    #brand { width: auto; }
     #conn { width: 1fr; content-align: right middle; }
     /* Fill the leftover height instead of auto-sizing: an auto TabbedContent
        lets the 1fr Fault Codes / Log widgets overflow the screen by a row,
@@ -226,7 +228,10 @@ class TrecuApp(App):
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
         with Horizontal(id="spine"):
-            yield Static("TrECU", id="brand")
+            brand = Text.assemble(
+                ("TrECU", "bold"), (f" v{__version__}", "dim")
+            )
+            yield Static(brand, id="brand")
             yield Static(id="conn")
         with TabbedContent(initial="tab-dashboard"):
             with TabPane("Dashboard", id="tab-dashboard"):
@@ -271,7 +276,7 @@ class TrecuApp(App):
             self.action_show_tab("tab-log")
         if self._transport_factory is not None:
             mode = "MOCK ECU (no hardware)" if self._mock else "serial K-line"
-            self._append_log(f"trecu ready — {mode} mode. Press 'r' to read.")
+            self._append_log(f"TrECU ready — {mode} mode. Press 'r' to read.")
             # Defer until the TabbedContent has finished re-parenting its panes,
             # so the worker's _populate can find #dtcs (mirrors _choose_port).
             self.call_after_refresh(self.action_read)
@@ -340,7 +345,7 @@ class TrecuApp(App):
         self.refresh_bindings()
         # Switching *to* Live Data retasks the ECU to streaming; leaving it
         # pauses the poll loop (the half-duplex "active view is what the session
-        # is doing" model — see docs/tui-redesign.md).
+        # is doing" model — see the TUI section of ROADMAP.md).
         self._sync_live_polling()
 
     def check_action(self, action: str, parameters: tuple) -> Optional[bool]:

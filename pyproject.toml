@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "TUI to read and decode ECU fault codes from Triumph motorcycles over a KKL (FT232RL) K-line cable"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "LGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 authors = [{ name = "Denis Yantarev", email = "denis.yantarev@gmail.com" }]
 keywords = ["triumph", "motorcycle", "ecu", "kwp2000", "obd", "kkl", "ftdi", "diagnostics"]
 
