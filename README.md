@@ -71,12 +71,10 @@ pip install -e .            # add ".[ftdi]" for direct pyftdi access
 ### Launch the TUI
 
 ```bash
-trecu --list-ports        # find your cable's serial port
-trecu                     # auto-select the cable (or open a picker)
-trecu --port <port>       # use a specific port
+trecu
 ```
 
-With no `--port`, trecu auto-selects when exactly one FTDI/KKL cable is present,
+TrECU auto-selects serial port when exactly one FTDI/KKL cable is present,
 and otherwise opens an interactive port picker. In the TUI: `r` read fault codes,
 `c` clear them (with confirmation), `←`/`→` switch tabs, `space` freeze the Live
 Data stream, `q` quit.
@@ -87,12 +85,8 @@ Data stream, `q` quit.
 trecu --port <port> --read       # read + print codes, then exit
 trecu --port <port> --live       # print a live-sensor snapshot
 trecu --port <port> --clear      # clear codes (asks first)
-trecu --port <port> --read -v    # same, plus raw byte traffic
+trecu --port <port> --read -v    # same, plus raw byte traffic (for debug purposes)
 ```
-
-If auto-detection fails on your bike, force a protocol and adjust its parameters
-— for example `--protocol iso9141 --init-address 0x33`, or `--protocol kwp-fast`.
-Run with `-v` to see the raw K-line traffic.
 
 ## License
 
