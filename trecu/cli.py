@@ -74,7 +74,7 @@ def _make_config(args: argparse.Namespace):
 def _make_transport(args: argparse.Namespace) -> Transport:
     if args.mock:
         if args.protocol == PROTOCOL_KWP_FAST:
-            from .transport.mock import MockKLineTransport
+            from .transport.mock_kline import MockKLineTransport
 
             return MockKLineTransport(
                 ecu_address=args.ecu_address, tester_address=args.tester_address

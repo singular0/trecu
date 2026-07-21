@@ -2,7 +2,7 @@ import pytest
 
 from trecu.protocol.kwp2000 import Kwp2000Client, NegativeResponse
 from trecu.service import DiagnosticService
-from trecu.transport.mock import MockKLineTransport
+from trecu.transport.mock_kline import MockKLineTransport
 
 
 def test_full_read_decode_clear_cycle():

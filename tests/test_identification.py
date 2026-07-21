@@ -7,7 +7,7 @@ from trecu.protocol.kwp2000 import (
     decode_identification_ascii,
 )
 from trecu.service import DiagnosticService
-from trecu.transport.mock import MockKLineTransport
+from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
 
 

@@ -81,7 +81,7 @@ branches on them rather than on concrete types:
   `MockKLineTransport` is fast-init only; `KLineSerialTransport` does both.
 
 **Two mock ECUs, one per protocol path** (`transport/mock_obd.py`,
-`transport/mock.py`). `MockObdTransport` is the default `--mock` and emulates the
+`transport/mock_kline.py`). `MockObdTransport` is the default `--mock` and emulates the
 real bike observed over the cable: 5-baud init, key bytes `08 08`, one stored
 `P1108` with MIL on. It's the ground truth for the iso9141 path — if you change
 that client, update this mock to match and vice versa. Both mocks also serve

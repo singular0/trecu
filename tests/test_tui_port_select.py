@@ -2,7 +2,7 @@ import asyncio
 
 from trecu.tui.app import TrecuApp
 from trecu.tui.port_select import PortSelectScreen
-from trecu.transport.mock import MockKLineTransport
+from trecu.transport.mock_kline import MockKLineTransport
 
 TWO_PORTS = [
     {"device": "/dev/cu.usbserial-A", "description": "FT232R USB UART",
