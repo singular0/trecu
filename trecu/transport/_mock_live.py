@@ -49,6 +49,33 @@ _SENSORS: Dict[int, Tuple[float, float, float, Callable[[float], bytes]]] = {
 }
 
 
+# Keihin packed live frame (kwp_local, the KWP path): the Keihin
+# MODE_READ_SENSORS RLI (21 80) answers with *every* channel in one frame. Slot
+# positions and encoders here are the inverse of the draft kwp_local
+# layout/formulas in ``triumph_pids.json`` (sequential 2-byte big-endian slots
+# in listed order) — keep the two in sync. Unmodelled slots stay zero, which
+# still decodes (to the channel's offset), like a quiescent sensor.
+_KWP_FRAME_SLOTS = 53
+# frame slot -> (base, amplitude, angular freq, physical value -> raw count).
+_KWP_CHANNELS: Dict[int, Tuple[float, float, float, Callable[[float], float]]] = {
+    0: (1300.0, 180.0, 0.09, lambda rpm: rpm),       # ch 0  RPM
+    1: (5.0, 3.0, 0.13, lambda pct: pct * 10),       # ch 1  TPS (0.1 %)
+    3: (90.0, 4.0, 0.05, lambda t: t + 25),          # ch 3  water temp (-25 offset)
+    5: (3.0, 2.0, 0.04, lambda gear: gear),          # ch 5  gear
+    15: (0.0, 0.0, 0.0, lambda mil: mil + 1),        # ch 17 MIL flag (-1 offset)
+    25: (13.8, 0.4, 0.06, lambda v: (v - 8) * 10),   # ch 50 battery (+8 V, 0.1 V)
+}
+
+
+def kwp_live_frame(tick: int) -> bytes:
+    """The packed ``21 80`` response body a mock Keihin serves at ``tick``."""
+    frame = bytearray(2 * _KWP_FRAME_SLOTS)
+    for slot, (base, amplitude, freq, to_raw) in _KWP_CHANNELS.items():
+        raw = _u16(to_raw(base + amplitude * math.sin(tick * freq)))
+        frame[2 * slot : 2 * slot + 2] = raw
+    return bytes(frame)
+
+
 def supported_pids() -> List[int]:
     """PIDs the mock ECUs model with live values."""
     return sorted(_SENSORS)

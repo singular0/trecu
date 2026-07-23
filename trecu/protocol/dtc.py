@@ -25,11 +25,22 @@ _STATUS_BITS = {
 }
 
 
-def decode_dtc_bytes(high: int, low: int) -> str:
-    """Convert a two-byte DTC into its ``P/C/B/U`` + four hex digits form.
+def decode_dtc_bytes(high: int, low: int, family: str | None = None) -> str:
+    """Convert a two-byte DTC into its letter + four hex digits form.
 
-    e.g. ``0x01 0x07`` -> ``"P0107"``.
+    ``family=None`` (the SAE J2012 structural decode): the top two bits of the
+    high byte select ``P/C/B/U``, e.g. ``0x01 0x07`` -> ``"P0107"``. This is
+    correct for OBD Mode 03/07 responses (and Mode 03 carried over KWP).
+
+    ``family="K"`` (or another letter): the bytes are a *raw* fault number that
+    is not J2012 bit-encoded — Keihin ECUs answering KWP ``0x18``
+    ReadDTCByStatus return these — so the given letter is prepended to the four
+    raw hex digits, e.g. ``0x15 0x35`` -> ``"K1535"`` (the community labelling
+    convention: the family comes from which ECU/service answered, not from
+    the bytes).
     """
+    if family is not None:
+        return f"{family}{high:02X}{low:02X}"
     letter = _DTC_LETTERS[(high >> 6) & 0x03]
     d1 = (high >> 4) & 0x03
     d2 = high & 0x0F
@@ -50,7 +61,6 @@ class Dtc:
     code: str                       # e.g. "P0107"
     status: int                     # raw statusOfDTC byte
     description: str = "Unknown code — consult the model service manual"
-    subsystem: str = ""
     raw: bytes = b""                # the raw DTC + status bytes as received
 
     @property
@@ -61,23 +71,23 @@ class Dtc:
     def is_known(self) -> bool:
         return not self.description.startswith("Unknown code")
 
-    def as_row(self) -> tuple[str, str, str, str]:
-        """Columns for tabular display: code, status, subsystem, description."""
+    def as_row(self) -> tuple[str, str, str]:
+        """Columns for tabular display: code, status, description."""
         flags = ", ".join(self.status_flags) or f"0x{self.status:02X}"
-        return (self.code, flags, self.subsystem, self.description)
+        return (self.code, flags, self.description)
 
 
 class DtcDatabase:
     """Lookup table mapping DTC codes to descriptions.
 
-    Backed by ``trecu/data/triumph_dtc.json``.  Generic SAE J2012 powertrain
-    codes are standardized and reliable; Triumph-specific ``P1xxx`` entries are
-    community-sourced and may vary by model/year — the file is meant to be
-    extended.
+    Backed by ``trecu/data/triumph_dtc.json`` — a flat ``{code: description}``
+    map imported from the official-service-manual wording in a community-sourced
+    extract (557 codes across the ``P``/``K``/``C``/``U``/``L`` families).
+    Descriptions may vary by model/year — the file is meant to be extended.
     """
 
-    def __init__(self, entries: dict[str, dict] | None = None):
-        self._entries: dict[str, dict] = entries or {}
+    def __init__(self, entries: dict[str, str] | None = None):
+        self._entries: dict[str, str] = entries or {}
 
     @classmethod
     def load_default(cls) -> "DtcDatabase":
@@ -96,18 +106,26 @@ class DtcDatabase:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def describe(self, code: str) -> tuple[str, str]:
-        """Return ``(description, subsystem)`` for ``code`` (fallbacks if absent)."""
+    def describe(self, code: str) -> str:
+        """Return the description for ``code`` (a fallback string if absent)."""
         entry = self._entries.get(code.upper())
         if entry is None:
-            return ("Unknown code — consult the model service manual", "")
-        return (entry.get("desc", ""), entry.get("subsystem", ""))
+            return "Unknown code — consult the model service manual"
+        return entry
 
-    def make_dtc(self, high: int, low: int, status: int, raw: bytes = b"") -> Dtc:
-        code = decode_dtc_bytes(high, low)
-        desc, subsystem = self.describe(code)
-        return Dtc(code=code, status=status, description=desc, subsystem=subsystem, raw=raw)
+    def make_dtc(
+        self, high: int, low: int, status: int, raw: bytes = b"", family: str | None = None
+    ) -> Dtc:
+        code = decode_dtc_bytes(high, low, family)
+        return Dtc(code=code, status=status, description=self.describe(code), raw=raw)
 
-    def decode_all(self, triples: Iterable[tuple[int, int, int]]) -> list[Dtc]:
-        """Decode an iterable of ``(high, low, status)`` DTC triples."""
-        return [self.make_dtc(h, l, s, bytes((h, l, s))) for (h, l, s) in triples]
+    def decode_all(
+        self, triples: Iterable[tuple[int, int, int]], family: str | None = None
+    ) -> list[Dtc]:
+        """Decode ``(high, low, status)`` DTC triples.
+
+        ``family`` selects the labelling scheme (see :func:`decode_dtc_bytes`):
+        ``None`` for the structural SAE J2012 decode, a letter (e.g. ``"K"``)
+        when the source service returns raw non-J2012 fault numbers.
+        """
+        return [self.make_dtc(h, l, s, bytes((h, l, s)), family) for (h, l, s) in triples]

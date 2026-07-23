@@ -89,6 +89,9 @@ class PidDef:
     min: float
     max: float
     _fn: Callable[[Env], float] = field(compare=False, repr=False)
+    # Byte position inside a packed multi-channel frame (kwp_local); unused by
+    # the per-PID obd_mode01 path, where each PID's data arrives alone.
+    frame_offset: int = 0
 
     @classmethod
     def from_entry(cls, pid: int, entry: dict) -> "PidDef":
@@ -103,6 +106,7 @@ class PidDef:
             min=float(entry.get("min", 0.0)),
             max=float(entry.get("max", 0.0)),
             _fn=compile_formula(formula),
+            frame_offset=int(entry.get("frame_offset", 0)),
         )
 
     def decode(self, data: bytes) -> float:
@@ -135,17 +139,87 @@ class SensorReading:
         return str(int(v)) if v == int(v) else f"{v:g}"
 
 
+class KwpLocalTable:
+    """Channel table for the packed Keihin live-data frame (``kwp_local``).
+
+    Every Triumph Keihin sensor is read with a single
+    ReadDataByLocalIdentifier request (``21 80``); the response is one frame
+    with each channel at a fixed byte offset. This table maps channel index ->
+    :class:`PidDef` (whose ``frame_offset``/``num_bytes`` locate it in the
+    frame) and splits such a frame into :class:`SensorReading`\\ s. The bundled
+    layout, divisors, and offsets are a **draft** pending a hardware capture of
+    a real ``21 80`` response (roadmap F4) — fixing them is a data-only edit to
+    ``triumph_pids.json``.
+    """
+
+    def __init__(self, lid: int, defs: Dict[int, PidDef]):
+        self.lid = lid
+        self._defs = defs
+
+    @classmethod
+    def from_dict(cls, section: dict) -> "KwpLocalTable":
+        # Channel keys are *decimal* Keihin channel indices (0..98, gappy) —
+        # unlike obd_mode01's hex PID keys.
+        defs = {
+            int(key): PidDef.from_entry(int(key), entry)
+            for key, entry in section.get("channels", {}).items()
+        }
+        return cls(int(section.get("lid", "80"), 16), defs)
+
+    def __len__(self) -> int:
+        return len(self._defs)
+
+    def __contains__(self, idx: int) -> bool:
+        return idx in self._defs
+
+    def channels(self) -> List[int]:
+        return sorted(self._defs)
+
+    def decode_frame(
+        self, data: bytes, channels: Optional[Iterable[int]] = None
+    ) -> List[SensorReading]:
+        """Split one packed frame into readings for ``channels`` (None = all).
+
+        A channel whose slot lies beyond the end of ``data`` — a real ECU may
+        send a shorter frame than the draft layout — is dropped, mirroring
+        ``read_live``'s "the ECU didn't answer it" convention.
+        """
+        out: List[SensorReading] = []
+        for idx in self.channels() if channels is None else channels:
+            d = self._defs.get(idx)
+            if d is None:
+                continue
+            chunk = data[d.frame_offset : d.frame_offset + d.num_bytes]
+            if len(chunk) < d.num_bytes:
+                continue
+            out.append(
+                SensorReading(
+                    pid=idx,
+                    name=d.name,
+                    value=d.decode(chunk),
+                    unit=d.unit,
+                    group=d.group,
+                    min=d.min,
+                    max=d.max,
+                    raw=chunk,
+                )
+            )
+        return out
+
+
 class PidDatabase:
     """Lookup table mapping PID numbers to :class:`PidDef` decoders.
 
     Backed by ``trecu/data/triumph_pids.json``. The ``obd_mode01`` section holds
     the standardized SAE J1979 PIDs (the confirmed ISO 9141-2 / OBD path); the
-    file is structured so a future model-specific ``kwp_local`` section can slot
-    in without changing this loader.
+    ``kwp_local`` section — exposed as the :attr:`kwp_local`
+    :class:`KwpLocalTable` (``None`` when absent) — holds the Triumph Keihin
+    packed-frame channels for the KWP path.
     """
 
     def __init__(self, defs: Optional[Dict[int, PidDef]] = None):
         self._defs: Dict[int, PidDef] = defs or {}
+        self.kwp_local: Optional[KwpLocalTable] = None
 
     @classmethod
     def load_default(cls) -> "PidDatabase":
@@ -166,7 +240,11 @@ class PidDatabase:
         for key, entry in section.items():
             pid = int(key, 16)
             defs[pid] = PidDef.from_entry(pid, entry)
-        return cls(defs)
+        db = cls(defs)
+        kwp = data.get("kwp_local")
+        if isinstance(kwp, dict) and kwp.get("channels"):
+            db.kwp_local = KwpLocalTable.from_dict(kwp)
+        return db
 
     def __len__(self) -> int:
         return len(self._defs)

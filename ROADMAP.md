@@ -1,6 +1,6 @@
 # trecu roadmap
 
-From "read fault codes" toward a TuneECU-class diagnostic tool. Ordered by
+From "read fault codes" toward a full-featured diagnostic tool. Ordered by
 increasing risk and increasing dependence on model-specific reverse engineering.
 Each phase says what already exists, what new work lands in which architectural
 seam (see `CLAUDE.md` for the four layers), and what gates it.
@@ -69,16 +69,24 @@ all model/ECU-specific in exactly the same way. Extend the `data/` +
 per concern (e.g. `triumph_pids.json`, `triumph_actuators.json`).
 
 Delivered: **`data/triumph_pids.json`** — the standardized OBD **Mode 01** PID
-set (name, group, unit, byte count, SAE J1979 formula, gauge bounds), loaded by
-the `PidDatabase` sensor-decode layer (`protocol/pids.py`). The top level is
-keyed by source (`obd_mode01`) so a model-specific `kwp_local` section can slot
-in without a loader change. Still to come (hardware-gated): the KWP record
-layouts and `triumph_actuators.json`.
+set (name, group, unit, byte count, SAE J1979 formula, gauge bounds) *and* the
+**`kwp_local` section**: a community-reverse-engineered 53-channel Keihin
+sensor table (names/kind/decimals/offset/fullscale from that community-sourced
+data), wired into decoding as `PidDatabase.kwp_local` / `decode_frame` over the
+one packed `21 80` frame. Its frame layout and divisors are a **draft** pending
+an F4 capture — fixing them is a data-only edit. Also delivered (2026-07):
+**`data/triumph_dtc.json` replaced wholesale** with a community-sourced
+service-manual import — 557 codes across `P`/`K`/`C`/`U`/`L` (was 95
+P-codes), flat `{code: description}` schema — plus **source-aware DTC
+labelling** (`dtc_family`): Keihin `0x18` responses carry raw non-J2012 fault
+numbers and decode as `K`-codes, not a bogus structural `P/C/B/U`. Still to
+come (hardware-gated): real `kwp_local` divisors/offsets and
+`triumph_actuators.json`.
 
 ### F3 — Security access (seed/key) spike  · **M, research** · gates 5, 6, 7
 KWP `SecurityAccess` (SID `0x27`: request seed → return computed key) almost
 certainly guards actuator control and all memory read/write on Triumph ECUs. The
-algorithm is community-known (TuneECU) but **not derivable from this codebase**.
+algorithm is community-known but **not derivable from this codebase**.
 Do this spike *before* committing to phases 5–7 — it determines whether they're
 feasible at all. Needs real hardware + a captured seed/key exchange to validate.
 
@@ -87,10 +95,16 @@ Important tension: the confirmed real bike does **5-baud init then plain OBD-II*
 (`iso9141` path) — and OBD-II has *no* actuator control, memory read, or reflash.
 Those are KWP2000-proprietary services. But that bike gets **no data from
 fast-init** (`kwp-fast` won't connect to it). ISO 14230 permits KWP2000 services
-*after a 5-baud init*, which is the likely real path for advanced features — a
-third combination this codebase doesn't have yet: **5-baud init + KWP services**.
-Confirm on hardware which service set the Sagem ECU exposes; the answer decides
-whether phases 5–7 ride on a new `kwp-slow` client or an extended `iso9141` one.
+*after a 5-baud init* — and that combination **now exists as the `kwp-slow`
+client** (`Kwp2000Client` with `init_mode="slow"`, the Keihin K-line path:
+5-baud at the ECU address `0xD5`, then `10 02` + KWP services; in the `auto`
+sweep between `iso9141` and `kwp-fast`). What remains hardware-gated: confirm
+which service set the *Sagem* ECU exposes and at which init address (`0x33` OBD
+vs a KWP-capable address) — the answer decides whether phases 5–7 ride on
+`kwp-slow` as-is (address override) or an extended `iso9141` client. Also still
+pending hardware: a real `21 80` capture to fix the draft `kwp_local` frame
+layout + per-channel divisors (correlate against known idle values), and which
+`0x1A` RLI carries which identity field.
 
 ---
 
@@ -120,8 +134,9 @@ from a real bike (that's the F2/F4 data-vs-constants point).
 ## Phase 2 — Read / clear DTCs  · **done**
 
 Both paths implemented, decoded, and tested (`test_iso9141_obd.py`,
-`test_mock_roundtrip.py`). Ongoing: extend `triumph_dtc.json` coverage as new
-model codes surface. No new architecture.
+`test_mock_roundtrip.py`). Code dictionary + source-aware `K`-code labelling
+delivered under F2 (2026-07, 557 codes). Ongoing: extend `triumph_dtc.json`
+coverage as new model codes surface. No new architecture.
 
 **Hardened against the real bike (2026-07):** the confirmed OBD read was
 silently reporting comms failures as "no stored codes." Three fixes, validated
@@ -153,9 +168,9 @@ Delivered:
   `DEFAULT_LIVE_PIDS` (RPM, coolant, TPS, MAP, O2, battery) + `DEFAULT_POLL_INTERVAL`.
   - `iso9141`: one OBD **Mode 01** request per PID — standardized (SAE J1979),
     the confirmed path.
-  - `kwp`: **ReadDataByLocalIdentifier** (SID `0x21`) — implemented against a
-    **placeholder** 1:1 id→record mapping; real Triumph record layouts are
-    model-specific (needs hardware capture, F4).
+  - `kwp`: **ReadDataByLocalIdentifier** `21 80` (the Keihin MODE_READ_SENSORS RLI)
+    — one packed frame carrying all channels, split per the `kwp_local` table
+    (F2 draft layout; real divisors/offsets need a hardware capture, F4).
 - **Poll loop UI**: a **Live Data** tab (streaming table with running min/max +
   trend sparklines) driven by a `set_interval` timer that resumes only while the
   tab is active and kicks a `@work(group="live")` reader; `space` freezes it.
@@ -173,7 +188,7 @@ PID is a separate paced round-trip), not the aspirational 6 Hz in the mockups.
 ## Phase 4 — Throttle body sync display  · **M**  · needs Phase 3
 
 **Goal:** per-cylinder intake-pressure readout for balancing throttle bodies —
-TuneECU's "Adjustments" screen.
+the kind of "Adjustments" screen other Triumph diagnostic tools offer.
 
 - Mostly a **specialized consumer of the Phase 3** stream + a purpose-built UI: a
   balance visualization (per-cylinder bar graph, "matched?" indicator at idle).
@@ -209,7 +224,8 @@ and the prerequisite backup for any future write.
   **RequestUpload `0x35` → TransferData `0x36` → RequestTransferExit `0x37`**.
   Needs a programming session + **SecurityAccess (F3)**.
 - **Seam:** a new map/flash module (block-transfer loop, progress, checksum
-  verify) + a file format (raw `.bin`, ideally TuneECU-compatible) + a CLI
+  verify) + a file format (raw `.bin`, ideally compatible with other
+  community tools) + a CLI
   `--dump-map FILE` command.
 - **Risk:** high reverse-engineering dependency — correct memory addresses and
   block sizing are model-specific and not in this codebase. Read-only, so no
@@ -230,7 +246,7 @@ interrupted write can brick the ECU.**
   "reads/clears DTCs only — it does not flash or tune the ECU." Shipping this
   means rewriting that section and the Safety section.
 - **Risk:** maximum. Absolute last. Consider whether it belongs in this tool at
-  all versus deferring to TuneECU.
+  all versus deferring to existing community tools.
 
 ---
 
@@ -240,7 +256,8 @@ interrupted write can brick the ECU.**
 2. **F1 (persistent session)** — the unlock for everything continuous; ✅ done.
 3. **Phase 3 → Phase 4** — live data, then throttle sync rides on it for cheap.
 4. **F3 + F4 spikes** (need real hardware) — resolve *before* committing to 5–7;
-   they may reveal 5–7 are blocked or need a new `kwp-slow` client.
+   the `kwp-slow` client now exists, so the open question is which service
+   set/address the real Sagem ECU answers (5–7 may still be blocked).
 5. **Phase 5 → 6** once security access is understood.
 6. **Phase 7** only after 6 is proven and with eyes open on the risk.
 

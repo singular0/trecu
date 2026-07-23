@@ -1,16 +1,19 @@
 """High-level diagnostic service used by both the CLI and the TUI.
 
-Supports two protocol paths and an ``auto`` mode that tries them in order:
+Supports three protocol paths and an ``auto`` mode that tries them in order
+(the same sweep other K-line Triumph tools walk):
 
-* ``iso9141`` — 5-baud slow init + OBD-II (confirmed on real Triumphs)
-* ``kwp-fast`` — KWP2000 fast-init + ReadDTCByStatus
+* ``iso9141`` — 5-baud slow init at 0x33 + OBD-II (confirmed on real Triumphs)
+* ``kwp-slow`` — KWP2000 with 5-baud init at the ECU address 0xD5 (the
+  Keihin K-line fallback)
+* ``kwp-fast`` — KWP2000 fast-init + StartCommunication
 """
 
 from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Iterator, List, Optional
 
 from .protocol.dtc import Dtc, DtcDatabase
@@ -28,10 +31,12 @@ from .transport.base import Transport, TransportError
 Logger = Callable[[str], None]
 
 PROTOCOL_ISO9141 = "iso9141"
+PROTOCOL_KWP_SLOW = "kwp-slow"
 PROTOCOL_KWP_FAST = "kwp-fast"
 PROTOCOL_AUTO = "auto"
-# Order tried in auto mode: ISO 9141 first (the confirmed Triumph path).
-_AUTO_ORDER = (PROTOCOL_ISO9141, PROTOCOL_KWP_FAST)
+# Order tried in auto mode: ISO 9141 first (the confirmed Triumph path), then
+# KWP slow init (the Keihin K-line fallback), then KWP fast init.
+_AUTO_ORDER = (PROTOCOL_ISO9141, PROTOCOL_KWP_SLOW, PROTOCOL_KWP_FAST)
 
 # Keepalive cadence for a persistent session. Both protocols' idle timeout
 # (KWP2000 P3max, ISO 9141-2) is ~5 s, so beat comfortably under that.
@@ -213,6 +218,11 @@ class DiagnosticService:
             cfg = self.config if isinstance(self.config, Iso9141Config) else Iso9141Config()
             return Iso9141Client(self.transport, cfg, self._logger)
         cfg = self.config if isinstance(self.config, Kwp2000Config) else Kwp2000Config()
+        # One base config serves both KWP variants (e.g. in auto mode); pin the
+        # init style to the protocol actually being attempted.
+        want = "slow" if proto == PROTOCOL_KWP_SLOW else "fast"
+        if cfg.init_mode != want:
+            cfg = replace(cfg, init_mode=want)
         return Kwp2000Client(self.transport, cfg, self._logger)
 
     def _connect(self):
@@ -245,7 +255,7 @@ class DiagnosticService:
             client = self._connect()
             ecu_info = self._read_identification(client)
             triples = client.read_dtcs()
-            dtcs = self.db.decode_all(triples)
+            dtcs = self.db.decode_all(triples, family=client.dtc_family)
             info = self._active_info
             return ReadResult(
                 key_bytes=info.key_bytes if info else b"",
@@ -284,22 +294,41 @@ class DiagnosticService:
     ) -> List[SensorReading]:
         """Read one live-data snapshot (Phase 3): the requested PIDs' values.
 
-        Polls each PID once over the active session (connecting lazily if
+        Reads one snapshot over the active session (connecting lazily if
         needed), serialized on the half-duplex ``_io_lock`` like every other
-        operation, then decodes the raw bytes via the PID table into
-        :class:`SensorReading`s ordered as requested. A PID the ECU didn't
-        answer — or that the table can't decode — is dropped, so the returned
-        list may be shorter than ``pids``. Decoding runs outside the lock (it's
-        pure computation, no wire traffic). Meant to be called repeatedly by the
-        TUI's poll loop; ``None`` uses :data:`DEFAULT_LIVE_PIDS`.
+        operation, then decodes the raw bytes into :class:`SensorReading`s
+        ordered as requested. Decoding runs outside the lock (it's pure
+        computation, no wire traffic). Meant to be called repeatedly by the
+        TUI's poll loop.
+
+        What one snapshot *is* depends on the client's ``live_source``:
+
+        * ``obd_mode01`` (iso9141) — one Mode 01 request per PID; ``pids=None``
+          uses :data:`DEFAULT_LIVE_PIDS`. A PID the ECU didn't answer — or the
+          table can't decode — is dropped.
+        * ``kwp_local`` (KWP / Keihin) — a single request for the packed
+          multi-channel frame (LID ``0x80``), split per the ``kwp_local``
+          channel table; here ``pids`` are ``kwp_local`` channel indices and ``None``
+          means every channel in the table.
         """
-        requested = list(DEFAULT_LIVE_PIDS if pids is None else pids)
+        requested = None if pids is None else list(pids)
         with self._io_lock:
             client = self._connect()
             read = getattr(client, "read_live", None)
             if read is None:
                 return []
-            raw = read(requested)
+            kwp_table = None
+            if getattr(client, "live_source", "obd_mode01") == "kwp_local":
+                kwp_table = self.pids.kwp_local
+                if kwp_table is None:
+                    return []
+                frame = read([kwp_table.lid]).get(kwp_table.lid)
+            else:
+                if requested is None:
+                    requested = list(DEFAULT_LIVE_PIDS)
+                raw = read(requested)
+        if kwp_table is not None:
+            return [] if frame is None else kwp_table.decode_frame(frame, requested)
         readings: List[SensorReading] = []
         for pid in requested:
             data = raw.get(pid)

@@ -83,3 +83,41 @@ def test_reading_formatting_integer_vs_decimal():
     assert SensorReading(0, "x", 1300.0, "rpm").formatted() == "1300"
     assert SensorReading(0, "x", 0.45, "V").formatted() == "0.45"
     assert SensorReading(0, "x", 13.80, "V").formatted() == "13.8"
+
+
+# -- KwpLocalTable (packed Keihin 21 80 frame, draft layout) ------------------
+def test_kwp_local_table_loads_alongside_obd_section():
+    db = PidDatabase.load_default()
+    assert len(db) == 19                       # obd_mode01 untouched
+    table = db.kwp_local
+    assert table is not None
+    assert table.lid == 0x80                   # Keihin's MODE_READ_SENSORS RLI
+    assert len(table) == 53                    # full Keihin channel table
+    for idx in (0, 3, 5, 50):                  # RPM, water temp, gear, battery
+        assert idx in table
+
+
+def test_kwp_local_decode_frame_applies_draft_formulas():
+    table = PidDatabase.load_default().kwp_local
+    frame = bytearray(106)
+    frame[6:8] = (115).to_bytes(2, "big")      # ch 3 water temp: 115 - 25 = 90
+    frame[10:12] = (4).to_bytes(2, "big")      # ch 5 gear
+    frame[50:52] = (58).to_bytes(2, "big")     # ch 50 battery: 5.8 + 8 = 13.8
+    by_ch = {r.pid: r for r in table.decode_frame(bytes(frame))}
+    assert len(by_ch) == 53
+    assert by_ch[3].value == 90 and by_ch[3].unit == "°C"
+    assert by_ch[5].value == 4
+    assert by_ch[50].value == 13.8 and by_ch[50].unit == "V"
+    assert by_ch[66].value == -1024            # zero slot -> the channel's offset
+
+
+def test_kwp_local_decode_frame_filters_and_orders_by_request():
+    table = PidDatabase.load_default().kwp_local
+    readings = table.decode_frame(bytes(106), channels=[50, 3, 999])
+    assert [r.pid for r in readings] == [50, 3]  # unknown channel dropped
+
+
+def test_kwp_local_decode_frame_drops_channels_beyond_short_frame():
+    table = PidDatabase.load_default().kwp_local
+    readings = table.decode_frame(bytes(10))   # only the first 5 slots present
+    assert {r.pid for r in readings} == {0, 1, 2, 3, 4}

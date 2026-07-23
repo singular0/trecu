@@ -18,11 +18,15 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..transport.base import Transport, TransportError
 from .kwp2000 import (
+    STATUS_CONFIRMED,
+    STATUS_PENDING,
     ConnectionInfo,
     EcuInfo,
     Logger,
     ProtocolError,
     decode_identification_ascii,
+    parse_obd_dtc_pairs,
+    slow_init_handshake,
 )
 
 # OBD-II (SAE J1979) service/mode identifiers we use.
@@ -37,11 +41,6 @@ POSITIVE_OFFSET = 0x40
 VI_PID_VIN = 0x02
 VI_PID_CALIBRATION_ID = 0x04
 VI_PID_ECU_NAME = 0x0A
-
-# Synthetic per-DTC status bytes so decoded codes carry a meaningful label
-# (OBD Mode 03/07 do not include a KWP-style status byte).
-STATUS_CONFIRMED = 0x08  # decode_status -> "confirmed"
-STATUS_PENDING = 0x04    # decode_status -> "pending"
 
 
 @dataclass
@@ -67,6 +66,13 @@ class Iso9141Config:
 class Iso9141Client:
     """5-baud init + OBD-II client. Same method surface as Kwp2000Client."""
 
+    # OBD Mode 03/07 responses are SAE-J2012 bit-encoded: decode structurally
+    # (duck-type parity with Kwp2000Client.dtc_family).
+    dtc_family: Optional[str] = None
+    # Live data is one Mode 01 request per standardized PID (vs. the KWP
+    # path's single packed kwp_local frame).
+    live_source = "obd_mode01"
+
     def __init__(
         self,
         transport: Transport,
@@ -81,21 +87,6 @@ class Iso9141Client:
     @staticmethod
     def _hex(data: bytes) -> str:
         return " ".join(f"{b:02X}" for b in data)
-
-    def _read_byte(self, timeout: float) -> Optional[int]:
-        b = self.transport.read(1, timeout)
-        return b[0] if b else None
-
-    def _read_sync(self, timeout: float) -> Optional[int]:
-        """Read bytes until the 0x55 sync appears, skipping break-pulse noise."""
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            b = self.transport.read(1, remaining)
-            if b and b[0] == 0x55:
-                return 0x55
 
     def _collect(self, timeout: float) -> bytes:
         """Collect a whole response: read until an idle gap or the timeout."""
@@ -114,46 +105,21 @@ class Iso9141Client:
 
     # -- init / connect ------------------------------------------------------
     def _slow_init(self) -> bytes:
-        t = self.transport
-        if not getattr(t, "supports_slow_init", False):
-            raise ProtocolError("transport does not support 5-baud slow init")
+        """One 5-baud init attempt via the shared handshake (see kwp2000.py).
+
+        The handshake validation — requiring the ECU's inverted-address close,
+        so a garbled init drives a retry instead of a half-open link — lives in
+        :func:`slow_init_handshake`, shared with the KWP slow-init path.
+        """
         cfg = self.config
-        t.reset_input()
-        self._log(f"5-baud init @ 0x{cfg.init_address:02X} …")
-        t.five_baud_init(cfg.init_address)
-
-        if self._read_sync(cfg.sync_timeout) != 0x55:
-            raise ProtocolError("no 0x55 sync byte after 5-baud init")
-        kb1 = self._read_byte(cfg.byte_timeout)
-        kb2 = self._read_byte(cfg.byte_timeout)
-        if kb1 is None or kb2 is None:
-            raise ProtocolError("missing key bytes after sync")
-
-        time.sleep(cfg.w4)  # W4
-        inv = (~kb2) & 0xFF
-        t.reset_input()
-        t.write(bytes((inv,)))
-        if t.echoes:
-            self._read_byte(cfg.byte_timeout)  # discard echo of our inverted byte
-        inv_addr = self._read_byte(cfg.byte_timeout)
-        # The ECU closes the handshake by echoing the inverted init address; its
-        # arrival is proof it accepted our key-byte reply. A missing or wrong
-        # inv-addr means the init didn't take (seen on the real bike when 5-baud
-        # timing drifts and the key bytes come back garbled) — reject so the
-        # connect() retry loop tries again rather than proceeding on a dead link.
-        expected = (~cfg.init_address) & 0xFF
-        if inv_addr is None:
-            raise ProtocolError(
-                f"slow-init handshake incomplete (key bytes {kb1:02X} {kb2:02X}): "
-                "no inverted-address reply"
-            )
-        if inv_addr != expected:
-            raise ProtocolError(
-                f"slow-init handshake mismatch: inv-addr {inv_addr:02X}, "
-                f"expected {expected:02X}"
-            )
-        self._log(f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, inv-addr {inv_addr:02X}")
-        return bytes((kb1, kb2))
+        return slow_init_handshake(
+            self.transport,
+            cfg.init_address,
+            w4=cfg.w4,
+            sync_timeout=cfg.sync_timeout,
+            byte_timeout=cfg.byte_timeout,
+            log=self._log,
+        )
 
     def connect(self) -> ConnectionInfo:
         if not getattr(self.transport, "supports_slow_init", False):
@@ -260,8 +226,8 @@ class Iso9141Client:
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
 
-        One Mode 01 request per PID — widely supported and how TuneECU's live
-        display polls. A PID the ECU doesn't answer (timeout, wrong echo) is
+        One Mode 01 request per PID — widely supported and how other live-data
+        tools poll too. A PID the ECU doesn't answer (timeout, wrong echo) is
         simply omitted, so a partial dict is normal; the caller decodes whatever
         came back via the shared PID table. Duck-typed peer of
         :meth:`Kwp2000Client.read_live`.
@@ -319,14 +285,7 @@ class Iso9141Client:
             raise ProtocolError(
                 f"unexpected Mode {mode:02X} response: {self._hex(resp)}"
             )
-        body = resp[1:]  # DTC byte pairs
-        out: List[Tuple[int, int, int]] = []
-        for i in range(0, len(body) - 1, 2):
-            hi, lo = body[i], body[i + 1]
-            if hi == 0 and lo == 0:
-                continue
-            out.append((hi, lo, status))
-        return out
+        return parse_obd_dtc_pairs(resp[1:], status)
 
     def _request_dtcs(
         self, mode: int, status: int, timeout: Optional[float] = None

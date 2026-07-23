@@ -137,24 +137,36 @@ class KLineSerialTransport(Transport):
     def five_baud_init(self, address: int) -> None:
         """ISO 9141 / ISO 14230 5-baud slow init.
 
-        Bit-bangs the address byte at 5 baud using the break condition (start
-        bit + 8 data bits LSB-first + stop bit). Each bit edge is scheduled
-        against an **absolute** deadline derived from a single start time, so the
-        per-bit ``break_condition`` ioctl latency and ``sleep`` overshoot cannot
-        *accumulate* across the 10-bit frame — a naive ``sleep(bit_time)`` per
-        bit drifts enough over the frame that the ECU samples the wrong address
-        and the handshake fails intermittently.
+        Bit-bangs the address byte at 5 baud using the break condition, with
+        the waveform other K-line tools drive on an FTDI cable: a 100 ms
+        pre-init settle, then **one full bit period of guaranteed idle-high**
+        before the start bit (so the ECU sees a clean falling edge even if the
+        line was just driven), then start bit + 8 data bits LSB-first + stop
+        bit — 11 bit-periods, ~2.2 s total. Each bit edge is scheduled against
+        an **absolute** deadline derived from a single start time, so the
+        per-bit ``break_condition`` ioctl latency and ``sleep`` overshoot
+        cannot *accumulate* across the frame — a naive ``sleep(bit_time)`` per
+        bit drifts enough over the frame that the ECU samples the wrong
+        address and the handshake fails intermittently. The ioctl is also
+        only touched when the line level actually *changes* (matching other
+        K-line implementations), keeping its latency out of the mid-frame
+        timing on runs of equal bits.
         """
         dev = self._dev
         bit_time = 1.0 / 5.0  # 200 ms per bit
         self.reset_input()
-        # Frame: 1 start bit (0), 8 data bits LSB first, 1 stop bit (1).
-        bits = [0] + [(address >> i) & 1 for i in range(8)] + [1]
+        time.sleep(0.1)  # pre-init settle (100 ms before the init, as other K-line tools do)
+        # Frame: 1 idle-high period, 1 start bit (0), 8 data bits LSB first,
+        # 1 stop bit (1) — the (address*4)+1025 bit pattern.
+        bits = [1, 0] + [(address >> i) & 1 for i in range(8)] + [1]
         try:
             start = time.monotonic()
+            level: int | None = None
             for i, bit in enumerate(bits):
-                # break asserted == line low == logical 0
-                dev.break_condition = (bit == 0)
+                if bit != level:
+                    # break asserted == line low == logical 0
+                    dev.break_condition = (bit == 0)
+                    level = bit
                 # Hold this bit until its slot ends on the absolute schedule.
                 remaining = (start + (i + 1) * bit_time) - time.monotonic()
                 if remaining > 0:

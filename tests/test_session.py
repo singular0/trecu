@@ -26,6 +26,8 @@ from trecu.transport.mock_obd import MockObdTransport
 class SpyClient:
     """Duck-typed protocol client that counts what the service asks of it."""
 
+    dtc_family = None  # structural J2012 decode, like the real clients' default
+
     def __init__(self):
         self.connects = 0
         self.reads = 0

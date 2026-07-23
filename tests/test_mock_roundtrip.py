@@ -10,7 +10,7 @@ def test_full_read_decode_clear_cycle():
         result = svc.read_faults()
         assert result.key_bytes == b"\xEA\x8F"
         codes = {d.code for d in result.dtcs}
-        assert codes == {"P0107", "P0201", "P1176"}
+        assert codes == {"P0107", "P0201", "P1105"}
         # descriptions resolved from the bundled DB
         assert all(d.description for d in result.dtcs)
 

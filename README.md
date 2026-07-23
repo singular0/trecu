@@ -10,10 +10,14 @@ bike's diagnostic connector.
 ## Features
 
 - **Auto-detected protocol** — ISO 9141-2 (5-baud slow init + OBD-II, the usual
-  Triumph path) or KWP2000 fast-init, chosen automatically or forced.
+  Sagem Triumph path), KWP2000 with 5-baud init (the Keihin K-line path, with
+  community-reverse-engineered addressing and services), or KWP2000 fast-init
+  — tried in that order automatically, or forced with `--protocol`.
 - **ECU identification** — VIN, calibration ID, part number, and ECU name.
 - **Read fault codes** — stored and pending DTCs, decoded to SAE J2012 codes
-  (`P/C/B/U` + 4 hex digits) with human-readable, Triumph-specific descriptions.
+  (`P/C/B/U` + 4 hex digits; Keihin-native `K` codes on the legacy KWP read)
+  and described with **official service-manual wording** — the bundled
+  dictionary covers 557 Triumph codes across the `P`/`K`/`C`/`U`/`L` families.
 - **Clear fault codes** — behind a confirmation guard.
 - **Live sensor streaming** — engine RPM, coolant temp, throttle position,
   intake MAP, O2, and battery voltage in a continuously-updating table with
@@ -34,7 +38,15 @@ Windows — but that is untested. It may or may not work on your bike.
 Triumph diagnostics are not officially documented — everything here rests on
 community reverse engineering, and the exact protocol parameters differ by
 model, year, and ECU supplier (**Keihin** vs **Sagem**). Codes read from an
-untested model may be wrong, incomplete, or fail to read at all.
+untested model may be wrong, incomplete, or fail to read at all. (For example,
+some Sagem models are reported to use 5-baud init address `0x43` instead of
+the OBD-standard `0x33` — if ISO 9141-2 won't connect, try
+`--init-address 0x43`.)
+
+**Scope: a KKL cable reaches K-line ECUs only** — ISO 9141-2 and ISO 14230
+(KWP2000). Modern CAN-based Triumphs, and the ABS and instrument modules even
+on K-line bikes, talk CAN and are **out of reach for this hardware** — that's
+an ELM327/CAN-interface job (e.g. TuneECU), not a TrECU one.
 
 If you want a proven, mature tool with years of real research and broad model
 coverage, use one of these instead — TrECU is not a replacement:

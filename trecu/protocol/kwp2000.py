@@ -1,11 +1,18 @@
 """KWP2000 (ISO 14230) client for reading Triumph ECU fault codes.
 
-The defaults below target the common Triumph case: a Keihin ECU speaking
-KWP2000 over the K-line at 10400 baud with fast-init and physical addressing.
+The defaults below target the real Triumph Keihin K-line case as documented by
+community reverse engineering: ECU address ``0xD5`` / tester ``0xF5``
+(headers ``81/82 D5 F5``), StartDiagnosticSession ``10 02``, DTCs read with OBD
+Mode 03 carried over KWP framing, and AccessTimingParameter after connect.
 Exact addresses, the diagnostic-session sub-function, and the DTC service can
-vary by model/year and ECU supplier (Keihin vs Sagem), so they live in
-:class:`Kwp2000Config` and can be overridden.  See the README and TuneECU for
-model-specific values.
+still vary by model/year and ECU supplier (Keihin vs Sagem), so they live in
+:class:`Kwp2000Config` and can be overridden.
+
+This module is also the home of the *shared* protocol vocabulary
+(:class:`ConnectionInfo`, :class:`EcuInfo`, :class:`ProtocolError`, …) and of
+the service logic both clients share: the 5-baud slow-init handshake
+(:func:`slow_init_handshake`) and OBD DTC pair parsing
+(:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them from here.
 """
 
 from __future__ import annotations
@@ -29,11 +36,21 @@ from .framing import (
 SID_START_COMMUNICATION = 0x81
 SID_STOP_COMMUNICATION = 0x82
 SID_START_DIAGNOSTIC_SESSION = 0x10
+SID_ACCESS_TIMING_PARAMETER = 0x83
 SID_TESTER_PRESENT = 0x3E
 SID_CLEAR_DIAGNOSTIC_INFO = 0x14
 SID_READ_DTC_BY_STATUS = 0x18
 SID_READ_ECU_IDENTIFICATION = 0x1A
 SID_READ_DATA_BY_LOCAL_ID = 0x21
+# OBD (SAE J1979) Mode 03, carried over KWP framing — the default DTC
+# read on the Triumph K-line (0x18 ReadDTCByStatus is the ABS/older variant).
+SID_OBD_MODE_STORED_DTC = 0x03
+
+# Synthetic per-DTC status bytes for OBD Mode 03/07 reads, which carry no
+# KWP-style statusOfDTC byte. Values chosen so decode_status() yields a
+# meaningful label. Shared by both protocol clients.
+STATUS_CONFIRMED = 0x08  # decode_status -> "confirmed"
+STATUS_PENDING = 0x04    # decode_status -> "pending"
 
 POSITIVE_RESPONSE_OFFSET = 0x40
 NEGATIVE_RESPONSE = 0x7F
@@ -83,27 +100,144 @@ class NegativeResponse(ProtocolError):
         )
 
 
+def parse_obd_dtc_pairs(body: bytes, status: int) -> List[Tuple[int, int, int]]:
+    """Parse OBD Mode 03/07 DTC byte pairs into ``(hi, lo, status)`` triples.
+
+    ``body`` is the response payload *after* the mode byte. All-zero pairs
+    (frame padding on ISO 9141-2; absent under KWP's explicit length) are
+    skipped; ``status`` is the synthetic status attached to every triple.
+    Shared by the iso9141 client and the KWP client's Mode-03-over-KWP read.
+    """
+    out: List[Tuple[int, int, int]] = []
+    for i in range(0, len(body) - 1, 2):
+        hi, lo = body[i], body[i + 1]
+        if hi == 0 and lo == 0:
+            continue
+        out.append((hi, lo, status))
+    return out
+
+
+def slow_init_handshake(
+    transport: Transport,
+    address: int,
+    *,
+    w4: float = 0.030,
+    sync_timeout: float = 0.6,
+    byte_timeout: float = 0.4,
+    log: Logger = lambda _m: None,
+) -> bytes:
+    """Run the ISO 9141-2 / ISO 14230 5-baud slow-init handshake at ``address``.
+
+    Shared by both protocol clients — the waveform and validation are identical;
+    only the init address differs (``0x33``/``0x43`` for the ISO 9141-2 "OBD"
+    init, the ECU address ``0xD5`` for a Keihin KWP slow init). Drives the
+    transport's ``five_baud_init``, waits for the ``0x55`` sync + two key
+    bytes, answers with the inverted second key byte, and **requires** the
+    ECU's inverted-address close. Returns the two key bytes.
+    """
+    if not getattr(transport, "supports_slow_init", False):
+        raise ProtocolError("transport does not support 5-baud slow init")
+
+    def read_byte(timeout: float) -> Optional[int]:
+        b = transport.read(1, timeout)
+        return b[0] if b else None
+
+    transport.reset_input()
+    log(f"5-baud init @ 0x{address:02X} …")
+    transport.five_baud_init(address)
+
+    # Read until the 0x55 sync appears, skipping break-pulse noise.
+    deadline = time.monotonic() + sync_timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProtocolError("no 0x55 sync byte after 5-baud init")
+        b = transport.read(1, remaining)
+        if b and b[0] == 0x55:
+            break
+    kb1 = read_byte(byte_timeout)
+    kb2 = read_byte(byte_timeout)
+    if kb1 is None or kb2 is None:
+        raise ProtocolError("missing key bytes after sync")
+
+    time.sleep(w4)  # W4
+    inv = (~kb2) & 0xFF
+    transport.reset_input()
+    transport.write(bytes((inv,)))
+    if transport.echoes:
+        read_byte(byte_timeout)  # discard echo of our inverted byte
+    inv_addr = read_byte(byte_timeout)
+    # The ECU closes the handshake by echoing the inverted init address; its
+    # arrival is proof it accepted our key-byte reply. A missing or wrong
+    # inv-addr means the init didn't take (seen on the real bike when 5-baud
+    # timing drifts and the key bytes come back garbled) — reject so the
+    # caller's retry loop tries again rather than proceeding on a dead link.
+    expected = (~address) & 0xFF
+    if inv_addr is None:
+        raise ProtocolError(
+            f"slow-init handshake incomplete (key bytes {kb1:02X} {kb2:02X}): "
+            "no inverted-address reply"
+        )
+    if inv_addr != expected:
+        raise ProtocolError(
+            f"slow-init handshake mismatch: inv-addr {inv_addr:02X}, "
+            f"expected {expected:02X}"
+        )
+    log(f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, inv-addr {inv_addr:02X}")
+    return bytes((kb1, kb2))
+
+
 @dataclass
 class Kwp2000Config:
-    ecu_address: int = 0x11
-    tester_address: int = 0xF1
+    # Triumph K-line addressing per community reverse engineering: engine ECU
+    # 0xD5, tester 0xF5 (request headers 81/82 D5 F5).
+    ecu_address: int = 0xD5
+    tester_address: int = 0xF5
     addr_mode: int = ADDR_PHYSICAL
     baudrate: int = 10400
-    # StartDiagnosticSession sub-function; set to None to skip that step.
-    diagnostic_session: Optional[int] = 0x81
+    # "fast" = fast-init pulse + StartCommunication (0x81);
+    # "slow" = ISO 14230 5-baud init at ecu_address (the Keihin K-line
+    # fallback) — the handshake itself yields the key bytes.
+    init_mode: str = "fast"
+    # StartDiagnosticSession sub-function (10 02 on the K-line);
+    # set to None to skip that step.
+    diagnostic_session: Optional[int] = 0x02
+    # DTC read service: 0x03 = OBD Mode 03 over KWP framing (the K-line
+    # default for Triumph) or 0x18 = ReadDTCByStatus (ABS/older-ECU variant).
+    read_dtc_service: int = SID_OBD_MODE_STORED_DTC
     read_dtc_status_mask: int = 0x00     # 0x00 = report DTCs regardless of status
     read_dtc_group: int = 0xFF00         # 0xFF00 = all groups
+    # DTC family letter for the 0x18 path. Keihin ECUs answer ReadDTCByStatus
+    # with raw fault numbers that are *not* SAE-J2012 bit-encoded; the
+    # community convention labels them by which ECU answered ("K" engine; ABS
+    # modules would be "C"/"L", but those are CAN-only on Triumphs — out of a
+    # KKL cable's reach). Ignored on the 0x03 path, whose responses are
+    # J2012-encoded.
+    dtc_family: str = "K"
     clear_dtc_group: int = 0xFF00
+    # AccessTimingParameter (0x83 sub 0x03 "set values") P-timing bytes sent
+    # after the session starts (83 03 1E 02 0A 14 00 =
+    # 30/2/10/20/0). None skips the step.
+    timing_params: Optional[bytes] = bytes((0x1E, 0x02, 0x0A, 0x14, 0x00))
     p2_timeout: float = 1.0              # normal max time to a response
     pending_timeout: float = 5.0        # extended wait after a 0x78 (busy)
     max_pending: int = 20
     init_low_ms: int = 25
     init_high_ms: int = 25
-    # ReadEcuIdentification record-local-identifiers (model/ECU-specific; set any
-    # to None to skip). Defaults follow the common KWP2000 assignments.
-    id_vin_rli: Optional[int] = 0x90       # vehicle identification number
-    id_hardware_rli: Optional[int] = 0x91  # ECU hardware number
-    id_software_rli: Optional[int] = 0x94  # ECU software / calibration version
+    # 5-baud slow-init handshake timing (init_mode="slow"); mirrors Iso9141Config.
+    w4: float = 0.030                    # gap before sending inverted key byte
+    sync_timeout: float = 0.6            # wait for the 0x55 sync after init
+    byte_timeout: float = 0.4            # wait for a single handshake byte
+    init_retries: int = 4                # slow-init can need a few tries
+    retry_wait: float = 2.0              # settle time between init attempts
+    # ReadEcuIdentification record-local-identifiers (model/ECU-specific; set
+    # any to None to skip). Defaults are from the community Triumph identifier
+    # list (0xA0, 0xAE, 0x8C); which record carries which field is unconfirmed on
+    # hardware (roadmap F4) — the standard KWP assignments (0x90 VIN / 0x91
+    # hardware / 0x94 software) remain available as overrides.
+    id_vin_rli: Optional[int] = 0xA0
+    id_hardware_rli: Optional[int] = 0xAE
+    id_software_rli: Optional[int] = 0x8C
 
 
 @dataclass
@@ -295,9 +429,69 @@ class Kwp2000Client:
         """
         self.tester_present(response_required=False)
 
+    def _slow_connect(self) -> bytes:
+        """5-baud init at the ECU address (the Keihin K-line fallback).
+
+        Runs the shared :func:`slow_init_handshake` under the same
+        retry/validation discipline as the iso9141 path — the flaky-5-baud
+        lesson from the real bike applies to any slow init, not just the
+        Sagem's. The handshake replaces StartCommunication: its key bytes are
+        the session's key bytes.
+        """
+        cfg = self.config
+        if not getattr(self.transport, "supports_slow_init", False):
+            raise ProtocolError("transport does not support 5-baud slow init")
+        last: Optional[Exception] = None
+        for attempt in range(max(1, cfg.init_retries)):
+            if attempt > 0:
+                self._log(f"slow-init retry {attempt} (settle {cfg.retry_wait}s)")
+                time.sleep(cfg.retry_wait)
+            try:
+                key = slow_init_handshake(
+                    self.transport,
+                    cfg.ecu_address,
+                    w4=cfg.w4,
+                    sync_timeout=cfg.sync_timeout,
+                    byte_timeout=cfg.byte_timeout,
+                    log=self._log,
+                )
+                self._log(f"connected (5-baud), key bytes: {self._hex(key)}")
+                return key
+            except (ProtocolError, TransportError) as exc:
+                last = exc
+                self._log(f"slow-init attempt {attempt + 1} failed: {exc}")
+        raise ProtocolError(f"5-baud init failed: {last}")
+
+    def _access_timing_parameter(self) -> None:
+        """Tune the KWP P-timing windows (AccessTimingParameter, best-effort).
+
+        The tester sends ``83 03 1E 02 0A 14 00`` ("set values") right after the
+        session starts. Not every ECU implements it, so a refusal or timeout is
+        logged, never fatal; ``timing_params=None`` skips the step entirely.
+        """
+        params = self.config.timing_params
+        if params is None:
+            return
+        try:
+            self.request(
+                bytes((SID_ACCESS_TIMING_PARAMETER, 0x03)) + bytes(params)
+            )
+        except ProtocolError as exc:
+            self._log(f"timing parameters not accepted: {exc}")
+
     def connect(self) -> ConnectionInfo:
-        """Full connect sequence: fast-init + StartCommunication + session."""
-        key_bytes = self.start_communication()
+        """Full connect sequence, per ``config.init_mode``.
+
+        ``"fast"``: fast-init pulse + StartCommunication (0x81).
+        ``"slow"``: ISO 14230 5-baud init at the ECU address; the handshake
+        yields the key bytes and no StartCommunication is sent.
+        Both then attempt StartDiagnosticSession (``10 02``) and
+        AccessTimingParameter, each best-effort.
+        """
+        if self.config.init_mode == "slow":
+            key_bytes = self._slow_connect()
+        else:
+            key_bytes = self.start_communication()
         started = False
         if self.config.diagnostic_session is not None:
             try:
@@ -306,11 +500,37 @@ class Kwp2000Client:
             except NegativeResponse as exc:
                 # Not fatal — some ECUs read DTCs in the default session.
                 self._log(f"diagnostic session not started: {exc}")
+        self._access_timing_parameter()
         return ConnectionInfo(key_bytes=key_bytes, session_started=started)
 
+    @property
+    def dtc_family(self) -> Optional[str]:
+        """Family letter for DTC decoding, or ``None`` for structural J2012.
+
+        Mode 03 over KWP framing carries J2012-encoded bytes (decode
+        structurally); ``0x18`` ReadDTCByStatus carries raw Keihin fault
+        numbers, labelled with ``config.dtc_family``.
+        """
+        if self.config.read_dtc_service == SID_OBD_MODE_STORED_DTC:
+            return None
+        return self.config.dtc_family
+
     def read_dtcs(self) -> List[Tuple[int, int, int]]:
-        """Read stored DTCs; return a list of ``(high, low, status)`` triples."""
+        """Read stored DTCs; return a list of ``(high, low, status)`` triples.
+
+        Two services, selected by ``config.read_dtc_service``:
+
+        * ``0x03`` (default) — OBD Mode 03 carried over KWP framing, the
+          K-line default for Triumph. The ``43 <hi lo>…`` response has no
+          per-DTC status byte, so triples carry the synthetic
+          :data:`STATUS_CONFIRMED` (like the iso9141 path).
+        * ``0x18`` — ReadDTCByStatus (ABS/older-ECU variant); triples carry the
+          ECU's real statusOfDTC byte.
+        """
         cfg = self.config
+        if cfg.read_dtc_service == SID_OBD_MODE_STORED_DTC:
+            resp = self.request(bytes((SID_OBD_MODE_STORED_DTC,)))
+            return parse_obd_dtc_pairs(resp[1:], STATUS_CONFIRMED)
         payload = bytes(
             (
                 SID_READ_DTC_BY_STATUS,
@@ -334,16 +554,19 @@ class Kwp2000Client:
             )
         return triples
 
+    # Live data on this path is the packed Keihin frame: the service requests
+    # the kwp_local table's LID (0x80) and splits the response by channel.
+    live_source = "kwp_local"
+
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll live data via ReadDataByLocalIdentifier (SID 0x21).
 
-        Duck-typed peer of :meth:`Iso9141Client.read_live`. **Placeholder record
-        mapping:** each requested id is read as a single RDBLI record and its
-        data bytes returned as-is, decoded by the shared PID table. Real Triumph
-        ECUs pack *several* sensors into each model-specific record layout (see
-        TuneECU) — those layouts aren't in this codebase and await a hardware
-        capture (roadmap F4). The 1:1 id->record convention here keeps this path
-        exercisable against the mock and symmetric with the OBD path. A record
+        Duck-typed peer of :meth:`Iso9141Client.read_live`: each requested id
+        is read as one RDBLI record and its data bytes returned as-is. On a
+        Triumph Keihin the record that matters is LID ``0x80`` — the Keihin
+        MODE_READ_SENSORS RLI — whose response packs *all* live channels into one
+        frame; the service requests exactly that id (from the ``kwp_local``
+        table, see ``live_source``) and splits the frame by channel. A record
         the ECU rejects (negative response) is omitted.
         """
         out: Dict[int, bytes] = {}

@@ -36,7 +36,6 @@ from ..protocol.dtc import DtcDatabase
 from ..protocol.pids import PidDatabase, SensorReading
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
-    DEFAULT_LIVE_PIDS,
     DEFAULT_POLL_INTERVAL,
     DiagnosticService,
     ReadResult,
@@ -205,7 +204,10 @@ class TrecuApp(App):
         self._verbose = verbose
         self._keepalive_interval = keepalive_interval
         self._poll_interval = poll_interval
-        self._live_pids = list(live_pids) if live_pids is not None else list(DEFAULT_LIVE_PIDS)
+        # None = let the service pick the source-appropriate default set (OBD
+        # DEFAULT_LIVE_PIDS, or every kwp_local channel on the KWP path).
+        self._live_pids = list(live_pids) if live_pids is not None else None
+        self._live_count = 0
         self._port = port or ("mock ECU" if mock else None)
         # Used only when no port is known yet and the user must choose one.
         self._list_ports = list_ports
@@ -251,7 +253,7 @@ class TrecuApp(App):
     def on_mount(self) -> None:
         table = self.query_one("#dtcs", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Code", "Status", "Subsystem", "Description")
+        table.add_columns("Code", "Status", "Description")
         live = self.query_one("#live", DataTable)
         live.cursor_type = "row"
         live.add_columns("Sensor", "Value", "Unit", "Min", "Max", "Trend")
@@ -296,7 +298,7 @@ class TrecuApp(App):
         # While the poll loop is running, the spine reports what the session is
         # actually doing: streaming N sensors (or frozen on the last snapshot).
         if self._streaming and self._state == "connected":
-            n = len(self._live_pids)
+            n = self._live_count
             label = "frozen" if self._live_frozen else f"streaming {n} sensors"
         # Synthetic MIL lamp: red dot only when the ECU reports stored faults.
         mil = "[red]●[/]  " if (self._last and self._last.count) else ""
@@ -471,6 +473,7 @@ class TrecuApp(App):
             still_live = False
         if not still_live:
             return
+        self._live_count = len(readings)
         self._update_live_table(readings)
         self._streaming = True
         if self._state != "connected":

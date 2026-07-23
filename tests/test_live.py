@@ -1,8 +1,9 @@
 """Phase 3 — live sensor streaming, end to end against the mock ECUs.
 
-Covers both duck-typed clients' read_live (OBD Mode 01 / KWP RDBLI 0x21), the
-DiagnosticService.read_live decode + ordering, the mocks emitting *moving*
-values, and the TUI's poll loop populating the Live Data tab.
+Covers both duck-typed clients' read_live (OBD Mode 01 per PID / the KWP
+packed 21 80 kwp_local frame), the DiagnosticService.read_live decode +
+ordering, the mocks emitting *moving* values, and the TUI's poll loop
+populating the Live Data tab.
 """
 
 import asyncio
@@ -26,14 +27,16 @@ def test_iso9141_read_live_returns_data_bytes():
     t.close()
 
 
-def test_kwp_read_live_via_rdbli():
+def test_kwp_read_live_returns_packed_frame():
     t = MockKLineTransport()
     t.open()
     client = Kwp2000Client(t)
     client.start_communication()
-    raw = client.read_live([0x0C, 0x42])
-    assert set(raw) == {0x0C, 0x42}
-    assert len(raw[0x42]) == 2  # battery voltage is a 2-byte record
+    # A Keihin serves all sensors as one frame on LID 0x80; any other record
+    # is rejected and therefore omitted.
+    raw = client.read_live([0x80, 0x0C])
+    assert set(raw) == {0x80}
+    assert len(raw[0x80]) == 106  # 53 draft channels x 2 bytes
     t.close()
 
 
@@ -66,10 +69,27 @@ def test_service_read_live_custom_pids():
     assert len(readings) == 1 and readings[0].pid == 0x05
 
 
-def test_kwp_service_read_live_matches_obd_shape():
+def test_kwp_service_read_live_decodes_packed_frame():
+    # The KWP path reads one 21 80 frame and splits it per the kwp_local
+    # table; pids=None means every channel.
     with DiagnosticService(MockKLineTransport(), protocol="kwp-fast") as svc:
         readings = svc.read_live()
-    assert [r.pid for r in readings] == list(DEFAULT_LIVE_PIDS)
+        second = {r.pid: r.value for r in svc.read_live()}
+    by_ch = {r.pid: r for r in readings}
+    assert len(readings) == 53
+    assert 1 <= by_ch[5].value <= 5                    # gear
+    assert by_ch[3].unit == "°C" and 86 <= by_ch[3].value <= 94   # water temp, -25 offset
+    assert by_ch[50].unit == "V" and 13.3 <= by_ch[50].value <= 14.3  # battery, +8 V offset
+    assert by_ch[17].value == 0                        # MIL off (raw 1, -1 offset)
+    assert by_ch[66].value == -1024                    # unmodelled slot -> offset
+    # The frame is alive: at least one channel moved between snapshots.
+    assert any(second[p] != by_ch[p].value for p in second)
+
+
+def test_kwp_service_read_live_honors_channel_filter():
+    with DiagnosticService(MockKLineTransport(), protocol="kwp-fast") as svc:
+        readings = svc.read_live([50, 3])
+    assert [r.pid for r in readings] == [50, 3]
 
 
 # -- mocks emit *moving* values ----------------------------------------------

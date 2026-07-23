@@ -14,6 +14,7 @@ from .service import (
     PROTOCOL_AUTO,
     PROTOCOL_ISO9141,
     PROTOCOL_KWP_FAST,
+    PROTOCOL_KWP_SLOW,
     DiagnosticService,
 )
 from .transport.base import Transport, TransportError
@@ -33,14 +34,15 @@ def _build_parser() -> argparse.ArgumentParser:
     conn.add_argument("--mock", action="store_true", help="use a simulated ECU (no hardware)")
     conn.add_argument(
         "--protocol",
-        choices=[PROTOCOL_AUTO, PROTOCOL_ISO9141, PROTOCOL_KWP_FAST],
+        choices=[PROTOCOL_AUTO, PROTOCOL_ISO9141, PROTOCOL_KWP_SLOW, PROTOCOL_KWP_FAST],
         default=PROTOCOL_AUTO,
         help="diagnostic protocol: auto (default), iso9141 (5-baud + OBD, "
-        "typical Triumph), or kwp-fast (KWP2000 fast-init)",
+        "confirmed Sagem Triumph), kwp-slow (KWP2000 with 5-baud init, "
+        "Keihin K-line), or kwp-fast (KWP2000 fast-init)",
     )
-    conn.add_argument("--init-address", type=lambda x: int(x, 0), default=0x33, help="ISO 9141 5-baud init address (default 0x33)")
-    conn.add_argument("--ecu-address", type=lambda x: int(x, 0), default=0x11, help="KWP2000 ECU target address (default 0x11)")
-    conn.add_argument("--tester-address", type=lambda x: int(x, 0), default=0xF1, help="KWP2000 tester source address (default 0xF1)")
+    conn.add_argument("--init-address", type=lambda x: int(x, 0), default=0x33, help="ISO 9141 5-baud init address (default 0x33; some Sagem models use 0x43)")
+    conn.add_argument("--ecu-address", type=lambda x: int(x, 0), default=0xD5, help="KWP2000 ECU target address (default 0xD5, the Triumph engine ECU)")
+    conn.add_argument("--tester-address", type=lambda x: int(x, 0), default=0xF5, help="KWP2000 tester source address (default 0xF5)")
     conn.add_argument("--timeout", type=float, default=1.0, help="response timeout seconds (default 1.0)")
     conn.add_argument("--db", help="path to a custom fault-code JSON database")
 
@@ -56,12 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _make_config(args: argparse.Namespace):
     """Build a protocol-specific config, or None for auto (service uses defaults)."""
-    if args.protocol == PROTOCOL_KWP_FAST:
+    if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
         return Kwp2000Config(
             ecu_address=args.ecu_address,
             tester_address=args.tester_address,
             baudrate=args.baud,
             p2_timeout=args.timeout,
+            init_mode="slow" if args.protocol == PROTOCOL_KWP_SLOW else "fast",
         )
     if args.protocol == PROTOCOL_ISO9141:
         return Iso9141Config(
@@ -74,11 +77,13 @@ def _make_config(args: argparse.Namespace):
 
 def _make_transport(args: argparse.Namespace) -> Transport:
     if args.mock:
-        if args.protocol == PROTOCOL_KWP_FAST:
+        if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
             from .transport.mock_kline import MockKLineTransport
 
             return MockKLineTransport(
-                ecu_address=args.ecu_address, tester_address=args.tester_address
+                ecu_address=args.ecu_address,
+                tester_address=args.tester_address,
+                supports_slow_init=(args.protocol == PROTOCOL_KWP_SLOW),
             )
         from .transport.mock_obd import MockObdTransport
 
@@ -148,11 +153,10 @@ def _print_dtcs(result) -> None:
     table = Table(title=f"{result.count} stored fault code(s)")
     table.add_column("Code", style="bold red")
     table.add_column("Status")
-    table.add_column("Subsystem")
     table.add_column("Description")
     for d in result.dtcs:
-        code, status, subsystem, desc = d.as_row()
-        table.add_row(code, status, subsystem, desc)
+        code, status, desc = d.as_row()
+        table.add_row(code, status, desc)
     console.print(table)
 
 
