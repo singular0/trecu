@@ -9,7 +9,7 @@ still vary by model/year and ECU supplier (Keihin vs Sagem), so they live in
 :class:`Kwp2000Config` and can be overridden.
 
 This module is also the home of the *shared* protocol vocabulary
-(:class:`ConnectionInfo`, :class:`EcuInfo`, :class:`ProtocolError`, …) and of
+(:class:`ConnectionInfo`, :class:`EcuInfo`, :class:`ProtocolError`, ...) and of
 the service logic both clients share: the 5-baud slow-init handshake
 (:func:`slow_init_handshake`) and OBD DTC pair parsing
 (:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them from here.
@@ -143,7 +143,7 @@ def slow_init_handshake(
         return b[0] if b else None
 
     transport.reset_input()
-    log(f"5-baud init @ 0x{address:02X} …")
+    log(f"5-baud init @ 0x{address:02X} ...")
     transport.five_baud_init(address)
 
     # Read until the 0x55 sync appears, skipping break-pulse noise.
@@ -384,7 +384,7 @@ class Kwp2000Client:
     # -- high level services -------------------------------------------------
     def start_communication(self) -> bytes:
         """Fast-init the K-line and start a KWP2000 session; return key bytes."""
-        self._log("fast-init …")
+        self._log("fast-init ...")
         try:
             self.transport.fast_init(self.config.init_low_ms, self.config.init_high_ms)
         except TransportError as exc:
@@ -521,7 +521,7 @@ class Kwp2000Client:
         Two services, selected by ``config.read_dtc_service``:
 
         * ``0x03`` (default) — OBD Mode 03 carried over KWP framing, the
-          K-line default for Triumph. The ``43 <hi lo>…`` response has no
+          K-line default for Triumph. The ``43 <hi lo>...`` response has no
           per-DTC status byte, so triples carry the synthetic
           :data:`STATUS_CONFIRMED` (like the iso9141 path).
         * ``0x18`` — ReadDTCByStatus (ABS/older-ECU variant); triples carry the

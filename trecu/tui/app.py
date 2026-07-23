@@ -25,6 +25,7 @@ from textual.widgets import (
     DataTable,
     Footer,
     Label,
+    LoadingIndicator,
     RichLog,
     Static,
     TabbedContent,
@@ -74,9 +75,9 @@ TransportForPort = Callable[[str], Transport]
 _SPINE = {
     "ready": ("grey62", "○", "ready"),
     "select": ("grey62", "○", "select a port"),
-    "connecting": ("yellow", "●", "connecting…"),
-    "reading": ("yellow", "●", "reading…"),
-    "clearing": ("yellow", "●", "clearing codes…"),
+    "connecting": ("yellow", "●", "connecting..."),
+    "reading": ("yellow", "●", "reading..."),
+    "clearing": ("yellow", "●", "clearing codes..."),
     "connected": ("green", "●", "connected"),
     "error": ("red", "●", "error"),
 }
@@ -122,6 +123,79 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class ConnectingScreen(ModalScreen):
+    """A modal shown while the K-line session is being established.
+
+    Purely a status overlay: it does *not* own the connect (the app's ``ecu``
+    worker does). It shows the target port and the protocol currently being
+    probed (the auto-sweep tries several in turn — see ``set_probing``), with a
+    standard ``LoadingIndicator`` spinner. Cancel (or escape) calls back into
+    the app. The background connect can't be interrupted mid-handshake — it's
+    blocked in serial I/O — so "cancel" means *stop waiting on it*: the app
+    drops the modal, restores the UI, and tears the session down once the
+    handshake finally returns.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    ConnectingScreen {
+        align: center middle;
+    }
+    #dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        border: thick $accent;
+        background: $surface;
+    }
+    #title { width: 100%; content-align: center middle; text-style: bold; }
+    #detail { width: 100%; content-align: center middle; margin-top: 1; }
+    #spinner { height: 1; margin: 1 0; }
+    #buttons { width: 100%; height: auto; align: center middle; }
+    """
+
+    def __init__(
+        self,
+        on_cancel: Callable[[], None],
+        port: str,
+    ):
+        super().__init__()
+        self._on_cancel = on_cancel
+        self._port = port
+        self._protocol = ""
+
+    def compose(self) -> ComposeResult:
+        with Middle(id="dialog"):
+            yield Label(f"Connecting to ECU via {self._port}", id="title")
+            yield Static(self._detail(), id="detail")
+            yield LoadingIndicator(id="spinner")
+            with Center(id="buttons"):
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    def _detail(self) -> str:
+        if not self._protocol:
+            return "Probing protocol..."
+        return f"Probing {self._protocol} protocol..."
+
+    def set_probing(self, protocol: str) -> None:
+        """Update the 'probing' line as the auto-sweep moves between protocols."""
+        self._protocol = protocol
+        try:
+            self.query_one("#detail", Static).update(self._detail())
+        except Exception:
+            pass  # modal already dismissed
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self._on_cancel()
+
+    def action_cancel(self) -> None:
+        self._on_cancel()
 
 
 class TrecuApp(App):
@@ -218,6 +292,12 @@ class TrecuApp(App):
         # keepalive ticker — reused across reads/clears instead of the old
         # connect-per-keypress model. Built lazily on the first read.
         self._session: Optional[DiagnosticService] = None
+        # The "connecting..." spinner modal shown during a *fresh* connect, the
+        # in-flight service (so Cancel can force it closed), and a flag set when
+        # the user cancels it (see _connect_with_modal).
+        self._connecting_screen: Optional[ConnectingScreen] = None
+        self._connecting_service: Optional[DiagnosticService] = None
+        self._cancelled_connect = False
         # Phase 3 live streaming: a paused poll timer (started on entering the
         # Live Data tab), a re-entrancy guard, per-PID running stats + history,
         # and a manual freeze toggle. `_streaming` drives the spine label.
@@ -383,6 +463,7 @@ class TrecuApp(App):
                 self._logger,
                 protocol=self._protocol,
                 pids=self._pids,
+                progress=self._on_connect_probe,
             )
             svc.start_session(self._keepalive_interval)
             self._session = svc
@@ -565,8 +646,11 @@ class TrecuApp(App):
 
     def _on_port_chosen(self, device: Optional[str]) -> None:
         if not device:
+            # Cancelling the picker means "no port" — and the app can't do
+            # anything without one, so quit (identically whether the picker
+            # appeared at startup or after a connect was cancelled).
             self._append_log("No port selected — exiting.")
-            self.exit()
+            self._exit_no_port()
             return
         if self._transport_for_port is None:
             self._append_log("[error] cannot build a transport for the chosen port")
@@ -577,15 +661,142 @@ class TrecuApp(App):
         self._append_log(f"using port {device}")
         self.action_read()
 
+    def _exit_no_port(self) -> None:
+        """Quit the app after the port picker was cancelled.
+
+        If the picker came up *after* a connect was cancelled, the ``ecu``
+        connect worker may still be suspended on a serial thread that can't be
+        interrupted (a 5-baud init waveform runs to completion). ``App.exit()``
+        would wait on that worker, leaving the app visibly running on the main
+        window for seconds. So cancel the worker and force the in-flight / held
+        transport closed first, then exit — the same clean quit as at startup.
+        """
+        self.workers.cancel_all()
+        svc, self._connecting_service = self._connecting_service, None
+        if svc is not None:
+            try:
+                svc.close()
+            except Exception:
+                pass
+        self._close_session()
+        self.exit()
+
+    # -- connecting modal ----------------------------------------------------
+    def _show_connecting(self) -> None:
+        scr = ConnectingScreen(self._request_cancel_connect, self._port or "—")
+        self._connecting_screen = scr
+        self.push_screen(scr)
+
+    def _on_connect_probe(self, protocol: str) -> None:
+        """Service connect-progress hook (runs on the worker thread).
+
+        Marshals the protocol label the auto-sweep is about to try onto the UI
+        thread, so the modal reflects which one is being probed right now.
+        """
+        self.call_from_thread(self._update_connecting_protocol, protocol)
+
+    def _update_connecting_protocol(self, protocol: str) -> None:
+        scr = self._connecting_screen
+        if scr is not None:
+            scr.set_probing(protocol)
+
+    def _dismiss_connecting(self) -> None:
+        scr, self._connecting_screen = self._connecting_screen, None
+        if scr is not None and scr in self.screen_stack:
+            try:
+                scr.dismiss()
+            except Exception:
+                pass
+
+    def _request_cancel_connect(self) -> None:
+        """Modal Cancel: abandon the in-flight connect and hand back at once.
+
+        The connect thread can't be interrupted cleanly, but it *is* blocked in
+        serial I/O — so we force its transport closed to unblock that read and
+        release the port, then drop the modal and hand straight back to the
+        **port picker** (if a port lister is configured) or the ready state.
+        Doing this here — rather than waiting for the thread to unwind, which on
+        a slow ``auto`` init sweep can be many seconds — is what makes Cancel
+        feel instant. The now-doomed connect finishes into a closed transport
+        and is discarded by :meth:`_connect_with_modal` (``_cancelled_connect``);
+        because we never publish its service as ``_session``, a re-picked (even
+        different) port still gets a clean, non-overlapping session.
+        """
+        if self._cancelled_connect:
+            return
+        self._cancelled_connect = True
+        self._dismiss_connecting()
+        self._append_log("connect cancelled")
+        svc = self._connecting_service
+        if svc is not None:
+            try:
+                svc.close()  # unblock the connect thread's read; release the port
+            except Exception:
+                pass
+        if self._list_ports is not None:
+            self._choose_port()
+        else:
+            self._set_state("ready")
+
+    def _do_connect(self, svc: DiagnosticService) -> None:
+        """Worker-thread body: open + connect ``svc`` (blocking)."""
+        svc.start_session(self._keepalive_interval)
+
+    async def _connect_with_modal(self) -> bool:
+        """Establish a fresh session behind a cancelable spinner modal.
+
+        Returns ``True`` once connected, ``False`` if the user cancelled or the
+        connect failed (the error is surfaced in that case). Runs on the event
+        loop from the ``ecu`` worker; the blocking connect is off-thread so the
+        Cancel button stays responsive. The service is built *here* (on the UI
+        thread) rather than in the worker so Cancel has a handle to force it
+        closed — see :meth:`_request_cancel_connect`.
+        """
+        self._set_state("connecting")
+        self._cancelled_connect = False
+        self._show_connecting()
+        svc = DiagnosticService(
+            self._transport_factory(),
+            self._config,
+            self._db,
+            self._logger,
+            protocol=self._protocol,
+            pids=self._pids,
+            progress=self._on_connect_probe,
+        )
+        self._connecting_service = svc
+        error: Optional[Exception] = None
+        try:
+            await asyncio.to_thread(self._do_connect, svc)
+        except Exception as exc:  # transport/protocol errors surface here
+            error = exc
+        self._connecting_service = None
+        self._dismiss_connecting()
+        if self._cancelled_connect:
+            # Cancel already dropped the modal, closed `svc`, and handed back to
+            # the picker. Ensure the (doomed) session is closed and unpublished.
+            await asyncio.to_thread(svc.close)
+            self._session = None
+            return False
+        if error is not None:
+            await asyncio.to_thread(svc.close)  # reconnect on next read
+            self._on_error(error)
+            return False
+        self._session = svc  # publish only once fully connected
+        return True
+
     # -- actions -------------------------------------------------------------
     @work(exclusive=True, group="ecu")
     async def action_read(self) -> None:
         if self._transport_factory is None:
             self._choose_port()
             return
-        # A fresh connect shows "connecting…"; a re-read over the held session
-        # is just "reading…".
-        self._set_state("connecting" if self._session is None else "reading")
+        # A fresh connect runs behind a cancelable "connecting..." spinner modal;
+        # a re-read over the held session skips it and is just "reading...".
+        if self._session is None:
+            if not await self._connect_with_modal():
+                return  # cancelled, or connect failed (already surfaced)
+        self._set_state("reading")
         try:
             result = await asyncio.to_thread(self._session_read)
         except Exception as exc:  # transport/protocol errors surface here
@@ -613,7 +824,7 @@ class TrecuApp(App):
             await asyncio.to_thread(self._close_session)  # reconnect on next read
             self._on_error(exc)
             return
-        self._append_log("fault codes cleared; re-reading…")
+        self._append_log("fault codes cleared; re-reading...")
         self.action_read()
 
     def _on_error(self, exc: Exception) -> None:

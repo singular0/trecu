@@ -112,12 +112,16 @@ class DiagnosticService:
         protocol: str = PROTOCOL_AUTO,
         client: Optional[object] = None,
         pids: Optional[PidDatabase] = None,
+        progress: Optional[Logger] = None,
     ):
         self.transport = transport
         self.config = config
         self.db = db or DtcDatabase.load_default()
         self.pids = pids or PidDatabase.load_default()
         self._logger = logger or (lambda _m: None)
+        # Connect-progress hook: called with each protocol label *before* it's
+        # probed, so a UI can show which one the auto-sweep is currently trying.
+        self._progress = progress or (lambda _p: None)
         self.protocol = protocol
         self._explicit_client = client
         self._active = None            # connected client
@@ -232,6 +236,7 @@ class DiagnosticService:
         for proto in self._candidate_protocols():
             client = self._build_client(proto)
             label = proto or client.__class__.__name__
+            self._progress(label)
             try:
                 info = client.connect()
             except (ProtocolError, TransportError) as exc:

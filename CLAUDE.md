@@ -24,7 +24,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (85 tests, ~19s, no hardware)
+./.venv/bin/python -m pytest              # full suite (88 tests, ~21s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
 ./.venv/bin/trecu --mock --read           # headless read + print + exit
@@ -103,7 +103,9 @@ because it's the confirmed real-Triumph path (5-baud slow init + OBD-II);
 `kwp-slow` is `Kwp2000Client` with `init_mode="slow"` (5-baud init at the ECU
 address `0xD5`, the Keihin K-line fallback — the service pins `init_mode`
 per attempt via `dataclasses.replace`). A caller can also inject a pre-built
-`client=` to bypass selection entirely (used by tests).
+`client=` to bypass selection entirely (used by tests). An optional `progress`
+callback fires with each candidate label *before* it's probed, so a UI can show
+which protocol the sweep is currently trying (the TUI's connecting modal does).
 
 **Two lifecycle modes.** One-shot (`with service:` → `open`/`close`) still
 connects lazily on the first operation — that's the CLI's `--read`/`--clear`
@@ -209,6 +211,25 @@ re-initialising the K-line per keypress. A failed operation tears the session
 down (`_close_session`) so the next read reconnects cleanly; `on_unmount` closes
 it on exit. The spine shows a green `⚡` keepalive lamp while a session is live,
 and reads `streaming N sensors` (or `frozen`) while the Live Data poll loop runs.
+A **fresh** connect (session is `None`) runs behind a `ConnectingScreen` modal —
+a standard `LoadingIndicator` spinner + Cancel button (`_connect_with_modal`);
+re-reads over the held session skip it. The modal names the **target port** and
+the **protocol currently being probed**: the service takes a `progress` callback
+that fires with each candidate label *before* it's tried, and the app marshals
+it onto the UI thread (`_on_connect_probe` → `set_probing`) so the auto-sweep's
+`iso9141 → kwp-slow → kwp-fast` progression is visible live. Because the blocking
+connect runs off the event loop in `asyncio.to_thread`, it **can't be interrupted
+cleanly**, but it *is* blocked in serial I/O — so Cancel (`_request_cancel_connect`,
+`_cancelled_connect`) **force-closes the in-flight service** to unblock that read
+and release the port, drops the modal, and **hands straight back to the port
+picker** (when a port lister is configured; the ready state otherwise) *without*
+waiting for the thread — which on a slow `auto` init sweep can be many seconds,
+so waiting would make Cancel feel dead. To get that handle, `_connect_with_modal`
+builds the `DiagnosticService` on the UI thread (not in the worker) and stashes
+it as `_connecting_service`. The doomed connect then finishes into a closed
+transport and `_connect_with_modal` discards it; crucially the service is
+published as `_session` **only on full success**, so a re-picked (even different)
+port always gets a clean, non-overlapping session.
 
 **TUI threading:** Textual is async but the protocol stack is blocking. The app
 runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the

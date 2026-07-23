@@ -28,7 +28,7 @@ def list_serial_ports() -> List[dict]:
     """Return metadata for the serial ports currently present on the system.
 
     FTDI-based KKL cables usually show a ``vid:pid`` of ``0403:6001`` and a
-    device path like ``/dev/ttyUSB0``, ``/dev/cu.usbserial-…``, or ``COMx``.
+    device path like ``/dev/ttyUSB0``, ``/dev/cu.usbserial-...``, or ``COMx``.
     """
     ports = []
     for p in list_ports.comports():
