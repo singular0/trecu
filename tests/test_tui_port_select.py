@@ -41,6 +41,32 @@ def test_picker_shown_when_multiple_ports_and_selection_reads():
     asyncio.run(scenario())
 
 
+def test_connect_button_reads_highlighted_port():
+    picked = {}
+
+    def transport_for_port(device):
+        picked["device"] = device
+        return MockKLineTransport()
+
+    app = TrecuApp(
+        transport_factory=None,
+        mock=False,
+        list_ports=lambda: list(TWO_PORTS),
+        transport_for_port=transport_for_port,
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PortSelectScreen)
+            await pilot.press("down")            # move to the second port
+            await pilot.click("#connect")        # Connect button, not Enter
+            await pilot.pause(0.4)
+            assert picked["device"] == "/dev/cu.usbserial-B"
+
+    asyncio.run(scenario())
+
+
 def test_rescan_repopulates_after_ports_appear():
     calls = {"n": 0}
 
@@ -60,11 +86,11 @@ def test_rescan_repopulates_after_ports_appear():
             await pilot.pause(0.2)
             screen = app.screen
             assert isinstance(screen, PortSelectScreen)
-            option_list = screen.query_one("#ports")
-            # First scan: empty -> single disabled placeholder option.
-            assert option_list.option_count == 1
+            table = screen.query_one("#ports")
+            # First scan: empty -> single placeholder row.
+            assert table.row_count == 1
             await pilot.press("r")              # rescan; now two ports appear
             await pilot.pause(0.2)
-            assert option_list.option_count == 2
+            assert table.row_count == 2
 
     asyncio.run(scenario())

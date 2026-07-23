@@ -6,12 +6,14 @@ from typing import Callable, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Label, OptionList
-from textual.widgets.option_list import Option
+from textual.widgets import Button, DataTable, Label, Static
 
 PortLister = Callable[[], List[dict]]
+
+# Sentinel row key for the "no ports found" placeholder row; guards selection.
+_EMPTY_KEY = "__empty__"
 
 
 class PortSelectScreen(ModalScreen[Optional[str]]):
@@ -22,8 +24,8 @@ class PortSelectScreen(ModalScreen[Optional[str]]):
         align: center middle;
     }
     #picker {
-        width: 80;
-        max-width: 90%;
+        width: 90;
+        max-width: 95%;
         height: auto;
         max-height: 80%;
         padding: 1 2;
@@ -32,7 +34,9 @@ class PortSelectScreen(ModalScreen[Optional[str]]):
     }
     #title { text-style: bold; width: 100%; margin-bottom: 1; }
     #ports { height: auto; max-height: 16; border: round $primary; }
-    #hint { color: $text-muted; width: 100%; margin-top: 1; }
+    #buttons { width: 100%; height: auto; margin-top: 1; }
+    #buttons #spacer { width: 1fr; height: 1; }
+    #buttons #cancel, #buttons #connect { margin-left: 2; }
     """
 
     BINDINGS = [
@@ -43,24 +47,38 @@ class PortSelectScreen(ModalScreen[Optional[str]]):
     def __init__(self, list_ports: PortLister):
         super().__init__()
         self._list_ports = list_ports
+        self._highlighted: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         with Container(id="picker"):
-            yield Label("Select the K-line serial port", id="title")
-            yield OptionList(id="ports")
-            yield Label("↑/↓ move · Enter select · r rescan · Esc cancel", id="hint")
+            yield Label("Select interface cable serial port (★ = likely candidate)", id="title")
+            table = DataTable(id="ports", zebra_stripes=True)
+            table.cursor_type = "row"
+            yield table
+            with Horizontal(id="buttons"):
+                yield Button("Refresh list", id="refresh")
+                yield Static(id="spacer")
+                yield Button("Cancel", id="cancel")
+                yield Button("Connect", id="connect", variant="primary")
 
     def on_mount(self) -> None:
+        table = self.query_one("#ports", DataTable)
+        table.add_columns("", "Port", "VID:PID", "Description")
         self._refresh()
 
     def _refresh(self) -> None:
         ports = self._list_ports()
-        option_list = self.query_one("#ports", OptionList)
-        option_list.clear_options()
+        table = self.query_one("#ports", DataTable)
+        table.clear()
 
         if not ports:
-            option_list.add_option(
-                Option("No serial ports found — connect the cable and press 'r'", disabled=True)
+            self._highlighted = None
+            table.add_row(
+                "",
+                "No serial ports found — press Refresh list once the cable is connected",
+                "",
+                "",
+                key=_EMPTY_KEY,
             )
             return
 
@@ -69,18 +87,36 @@ class PortSelectScreen(ModalScreen[Optional[str]]):
         for p in ports:
             vid, pid = p.get("vid"), p.get("pid")
             vidpid = f"{vid:04x}:{pid:04x}" if vid and pid else ""
-            marker = "  ★ likely KKL cable" if p.get("likely_kkl") else ""
-            desc = p.get("description") or ""
-            label = f"{p['device']}   {vidpid}  {desc}{marker}".rstrip()
-            option_list.add_option(Option(label, id=p["device"]))
+            marker = "★" if p.get("likely_kkl") else ""
+            table.add_row(
+                marker,
+                p["device"],
+                vidpid,
+                p.get("description") or "",
+                key=p["device"],
+            )
 
-        option_list.focus()
-        option_list.highlighted = 0
+        self._highlighted = ports[0]["device"]
+        table.focus()
+        table.move_cursor(row=0)
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        device = event.option.id
-        if device:  # ignore the disabled placeholder (no id)
+    def _connect(self, device: Optional[str]) -> None:
+        if device and device != _EMPTY_KEY:  # ignore the placeholder row
             self.dismiss(device)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._highlighted = event.row_key.value
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._connect(event.row_key.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "refresh":
+            self._refresh()
+        elif event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "connect":
+            self._connect(self._highlighted)
 
     def action_rescan(self) -> None:
         self._refresh()
