@@ -137,6 +137,11 @@ class DiagnosticService:
         self._io_lock = threading.Lock()
         self._keepalive: Optional[_Keepalive] = None
 
+    @property
+    def active_protocol(self) -> str:
+        """Protocol selected for the current connection, if connected."""
+        return self._active_proto
+
     # -- lifecycle -----------------------------------------------------------
     def open(self) -> None:
         self.transport.open()

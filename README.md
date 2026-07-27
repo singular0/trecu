@@ -111,25 +111,29 @@ tagged commit.
 
 </details>
 
-### Launch the TUI
+### CLI
 
 ```bash
-trecu
+trecu                      # launch the interactive terminal UI (default)
+trecu tui                  # launch it explicitly
+trecu ports                # list detected serial ports
+trecu faults               # read and print stored fault codes
+trecu info                 # print ECU identification
+trecu sensors              # print a live-sensor snapshot
+trecu clear                # clear stored fault codes (asks first)
+trecu clear -y             # clear without prompting
+trecu faults --debug       # include raw protocol traffic
+trecu version
+trecu help
 ```
 
-TrECU auto-selects serial port when exactly one FTDI/KKL cable is present,
-and otherwise opens an interactive port picker. In the TUI: `r` read fault codes,
-`c` clear them (with confirmation), `←`/`→` switch tabs, `space` freeze the Live
-Data stream, `q` quit.
+Diagnostic commands auto-select the cable when exactly one FTDI/KKL device is
+present. Use `--protocol`, `--init-address`, `--ecu-address`,
+`--tester-address`, and `--timeout` to override connection parameters.
 
-### Headless CLI
-
-```bash
-trecu --port <port> --read       # read + print codes, then exit
-trecu --port <port> --live       # print a live-sensor snapshot
-trecu --port <port> --clear      # clear codes (asks first)
-trecu --port <port> --read -v    # same, plus raw byte traffic (for debug purposes)
-```
+When `trecu tui` cannot auto-select a single cable, it opens the port picker.
+Inside the UI, use `r` to read faults, `c` to clear them, `←`/`→` to switch
+tabs, `space` to freeze live data, and `q` to quit.
 
 ## License
 

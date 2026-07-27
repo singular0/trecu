@@ -23,14 +23,38 @@ from .transport.base import Transport, TransportError
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="trecu",
+        add_help=False,
+        usage=(
+            "trecu [tui|ports|faults|info|sensors|clear|version|help] "
+            "[--protocol {auto,iso9141,kwp-slow,kwp-fast}] "
+            "[--init-address INIT_ADDRESS] [--ecu-address ECU_ADDRESS] "
+            "[--tester-address TESTER_ADDRESS] [--timeout TIMEOUT] [-y] [--debug]"
+        ),
         description="Read and decode Triumph motorcycle ECU fault codes over a "
         "KKL (FT232RL) K-line cable.",
     )
-    p.add_argument("--version", action="version", version=f"TrECU {__version__}")
+    p.add_argument(
+        "command",
+        nargs="?",
+        default="tui",
+        choices=(
+            "tui",
+            "ports",
+            "faults",
+            "info",
+            "sensors",
+            "clear",
+            "version",
+            "help",
+        ),
+        help="operation to perform",
+    )
 
     conn = p.add_argument_group("connection")
-    conn.add_argument("-p", "--port", help="serial port (e.g. /dev/ttyUSB0, /dev/cu.usbserial-XXXX, or COM3)")
-    conn.add_argument("--baud", type=int, default=10400, help="K-line baud rate (default 10400)")
+    # Kept as hidden development hooks. The public CLI auto-detects the serial
+    # port and uses the standard K-line baud rate.
+    conn.add_argument("-p", "--port", help=argparse.SUPPRESS)
+    conn.add_argument("--baud", type=int, default=10400, help=argparse.SUPPRESS)
     conn.add_argument("--mock", action="store_true", help=argparse.SUPPRESS)
     conn.add_argument(
         "--protocol",
@@ -44,17 +68,11 @@ def _build_parser() -> argparse.ArgumentParser:
     conn.add_argument("--ecu-address", type=lambda x: int(x, 0), default=0xD5, help="KWP2000 ECU target address (default 0xD5, the Triumph engine ECU)")
     conn.add_argument("--tester-address", type=lambda x: int(x, 0), default=0xF5, help="KWP2000 tester source address (default 0xF5)")
     conn.add_argument("--timeout", type=float, default=1.0, help="response timeout seconds (default 1.0)")
-    conn.add_argument("--db", help="path to a custom fault-code JSON database")
 
-    action = p.add_argument_group("actions (default: launch the TUI)")
-    action.add_argument("-l", "--list-ports", action="store_true", help="list serial ports and exit")
-    action.add_argument("-r", "--read", action="store_true", help="read codes once, print them, and exit (no TUI)")
-    action.add_argument("--live", action="store_true", help="read one live-data (sensor) snapshot, print it, and exit (no TUI)")
-    action.add_argument("-c", "--clear", action="store_true", help="clear stored codes and exit")
-    action.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation on --clear")
-    action.add_argument(
-        "-v",
-        "--verbose",
+    options = p.add_argument_group("options")
+    options.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation when clearing faults")
+    options.add_argument(
+        "--debug",
         action="store_true",
         help="show debug logging, including raw protocol byte traffic",
     )
@@ -84,7 +102,7 @@ def _make_transport(args: argparse.Namespace) -> Transport:
     if args.mock:
         # Seed the simulated ECU with a random, type-varied set of real DB codes
         # so `--mock` shows a plausible spread of faults, not one canned code.
-        pairs = _load_db(args).random_dtcs()
+        pairs = DtcDatabase.load_default().random_dtcs()
         if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
             from .transport.mock_kline import MockKLineTransport
 
@@ -115,7 +133,7 @@ def _autodetect_port() -> str:
     if not candidates:
         raise SystemExit(
             "No FTDI/KKL cable detected. Plug it in, or pass --port, or use "
-            "--mock. Run `trecu --list-ports` to see what is available."
+            "--mock. Run `trecu ports` to see what is available."
         )
     raise SystemExit(
         "Multiple FTDI devices found; specify one with --port. Candidates: "
@@ -123,26 +141,27 @@ def _autodetect_port() -> str:
     )
 
 
-def _load_db(args: argparse.Namespace) -> DtcDatabase:
-    if args.db:
-        return DtcDatabase.load_file(args.db)
-    return DtcDatabase.load_default()
-
-
 def _cmd_list_ports() -> int:
+    from rich.console import Console
+    from rich.table import Table
+
     from .transport.serial_kline import list_serial_ports
 
     ports = list_serial_ports()
     if not ports:
         print("No serial ports found.")
         return 0
-    print(f"{'DEVICE':<28} {'VID:PID':<10} DESCRIPTION")
+    table = Table()
+    table.add_column("Device")
+    table.add_column("VID:PID")
+    table.add_column("Description")
     for p in ports:
         vidpid = (
             f"{p['vid']:04x}:{p['pid']:04x}" if p["vid"] and p["pid"] else "-"
         )
         marker = "  <- likely KKL cable" if p["likely_kkl"] else ""
-        print(f"{p['device']:<28} {vidpid:<10} {p['description']}{marker}")
+        table.add_row(p["device"], vidpid, f"{p['description']}{marker}")
+    Console().print(table)
     return 0
 
 
@@ -151,16 +170,10 @@ def _print_dtcs(result) -> None:
     from rich.table import Table
 
     console = Console()
-    proto = f" via {result.protocol}" if result.protocol else ""
-    console.print(f"[bold]Connected{proto}.[/bold]")
-    if result.ecu_info:
-        for label, value in result.ecu_info.as_rows():
-            console.print(f"  {label}: [cyan]{value}[/cyan]")
     if not result.dtcs:
         console.print("[green]No stored fault codes.[/green]")
         return
-    noun = "code" if result.count == 1 else "codes"
-    table = Table(title=f"{result.count} stored fault {noun}")
+    table = Table()
     table.add_column("Code", style="bold red")
     table.add_column("Status")
     table.add_column("Description")
@@ -174,8 +187,8 @@ def _cmd_read(args: argparse.Namespace) -> int:
     logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger,
-        protocol=args.protocol, verbose=args.verbose
+        transport, _make_config(args), logger=logger,
+        protocol=args.protocol, verbose=args.debug
     )
     try:
         with service:
@@ -187,6 +200,36 @@ def _cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_info(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.table import Table
+
+    logger = lambda m: print(m, file=sys.stderr)
+    transport = _make_transport(args)
+    service = DiagnosticService(
+        transport, _make_config(args), logger=logger,
+        protocol=args.protocol, verbose=args.debug
+    )
+    try:
+        with service:
+            info = service.read_identification()
+    except (TransportError, ProtocolError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    console = Console()
+    if info and not info.is_empty:
+        table = Table()
+        table.add_column("Field")
+        table.add_column("Value", style="cyan")
+        for label, value in info.as_rows():
+            table.add_row(label, value)
+        console.print(table)
+    else:
+        console.print("[yellow]No ECU identification reported.[/yellow]")
+    return 0
+
+
 def _print_live(readings) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -195,7 +238,7 @@ def _print_live(readings) -> None:
     if not readings:
         console.print("[yellow]No live data reported by this ECU.[/yellow]")
         return
-    table = Table(title="Live data snapshot")
+    table = Table()
     table.add_column("Sensor")
     table.add_column("Value", justify="right", style="bold cyan")
     table.add_column("Unit")
@@ -209,8 +252,8 @@ def _cmd_live(args: argparse.Namespace) -> int:
     logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger,
-        protocol=args.protocol, verbose=args.verbose
+        transport, _make_config(args), logger=logger,
+        protocol=args.protocol, verbose=args.debug
     )
     try:
         with service:
@@ -231,8 +274,8 @@ def _cmd_clear(args: argparse.Namespace) -> int:
     logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger,
-        protocol=args.protocol, verbose=args.verbose
+        transport, _make_config(args), logger=logger,
+        protocol=args.protocol, verbose=args.debug
     )
     try:
         with service:
@@ -249,16 +292,20 @@ def _cmd_tui(args: argparse.Namespace) -> int:
 
     common = dict(
         config=_make_config(args),
-        db=_load_db(args),
         protocol=args.protocol,
-        verbose=args.verbose,
+        verbose=args.debug,
     )
 
     if args.mock:
         # Share one simulated ECU across connects so clearing codes persists,
         # mirroring how a real ECU retains state between sessions.
         shared = _make_transport(args)
-        app = TrecuApp(transport_factory=lambda: shared, mock=True, port="mock", **common)
+        app = TrecuApp(
+            transport_factory=lambda: shared,
+            mock=True,
+            port="mock",
+            **common,
+        )
         app.run()
         return 0
 
@@ -267,8 +314,8 @@ def _cmd_tui(args: argparse.Namespace) -> int:
     baud = args.baud
     transport_for_port = lambda port: KLineSerialTransport(port, baud)  # noqa: E731
 
-    # Determine the port. Explicit --port wins; a single obvious FTDI cable is
-    # auto-selected; otherwise (multiple or none) let the user pick in the TUI.
+    # An explicit port or a single obvious FTDI cable connects immediately.
+    # With multiple/no candidates, the TUI presents its port picker.
     chosen: Optional[str] = args.port
     if chosen is None:
         candidates = [p for p in list_serial_ports() if p["likely_kkl"]]
@@ -284,7 +331,7 @@ def _cmd_tui(args: argparse.Namespace) -> int:
         )
     else:
         app = TrecuApp(
-            transport_factory=None,  # triggers the in-TUI port picker
+            transport_factory=None,
             mock=False,
             list_ports=list_serial_ports,
             transport_for_port=transport_for_port,
@@ -296,15 +343,25 @@ def _cmd_tui(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.list_ports:
+    if args.command == "help":
+        _build_parser().print_help()
+        return 0
+    if args.command == "version":
+        print(f"TrECU {__version__}")
+        return 0
+    if args.command == "tui":
+        return _cmd_tui(args)
+    if args.command == "ports":
         return _cmd_list_ports()
-    if args.clear:
+    if args.command == "clear":
         return _cmd_clear(args)
-    if args.read:
+    if args.command == "faults":
         return _cmd_read(args)
-    if args.live:
+    if args.command == "info":
+        return _cmd_info(args)
+    if args.command == "sensors":
         return _cmd_live(args)
-    return _cmd_tui(args)
+    raise AssertionError(f"unhandled command: {args.command}")
 
 
 if __name__ == "__main__":  # pragma: no cover

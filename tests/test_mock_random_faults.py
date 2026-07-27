@@ -72,13 +72,20 @@ def test_mock_obd_enumerates_more_than_three_dtcs():
 
 
 def test_cli_mock_transport_gets_multiple_random_faults():
-    args = _build_parser().parse_args(["--mock"])
+    args = _build_parser().parse_args(["faults", "--mock"])
     transport = _make_transport(args)
     assert isinstance(transport, MockObdTransport)
     assert len(transport._dtcs) >= 2
 
 
 def test_cli_mock_kwp_transport_gets_multiple_random_faults():
-    args = _build_parser().parse_args(["--mock", "--protocol", "kwp-slow"])
+    args = _build_parser().parse_args(
+        ["faults", "--mock", "--protocol", "kwp-slow"]
+    )
     transport = _make_transport(args)
     assert len(transport._dtcs) >= 2
+
+
+def test_cli_rejects_removed_db_option():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--db", "faults.json"])

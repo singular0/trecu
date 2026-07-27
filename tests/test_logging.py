@@ -16,8 +16,8 @@ def test_logger_filters_debug_but_keeps_warnings() -> None:
     assert messages == ["[warning] recoverable problem"]
 
 
-def test_verbose_cli_enables_protocol_debug_messages(capsys) -> None:
-    args = ["--mock", "--protocol", "iso9141", "--read"]
+def test_debug_cli_enables_protocol_debug_messages(capsys) -> None:
+    args = ["faults", "--mock", "--protocol", "iso9141"]
 
     assert main(args) == 0
     normal = capsys.readouterr()
@@ -25,16 +25,17 @@ def test_verbose_cli_enables_protocol_debug_messages(capsys) -> None:
     assert "<- " not in normal.err
     assert "OBD request:" not in normal.err
     assert "ECU operation:" not in normal.err
-    assert "Connected via iso9141." in normal.out
+    assert "Connected via iso9141." not in normal.out
     assert "ECU key bytes" not in normal.out
 
-    assert main([*args, "-v"]) == 0
-    verbose = capsys.readouterr()
-    assert "-> " in verbose.err
-    assert "<- " in verbose.err
-    assert "OBD request: Mode 09 (vehicle information)" in verbose.err
-    assert "OBD ECU status:" in verbose.err
-    assert "ECU operation complete: decoded" in verbose.err
+    assert main([*args, "--debug"]) == 0
+    debug = capsys.readouterr()
+    assert "-> " in debug.err
+    assert "<- " in debug.err
+    assert "OBD request: Mode 09 (vehicle information)" in debug.err
+    assert "OBD ECU status:" in debug.err
+    assert "ECU operation complete: decoded" in debug.err
+    assert "Connected via iso9141." not in debug.out
 
 
 def test_kwp_debug_identifies_services_and_results() -> None:
