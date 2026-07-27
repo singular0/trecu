@@ -18,7 +18,7 @@ from typing import Callable, Iterable, Iterator, List, Optional
 
 from .protocol.dtc import Dtc, DtcDatabase
 from .protocol.iso9141 import Iso9141Client, Iso9141Config
-from .protocol.pids import FormulaError, PidDatabase, SensorReading
+from .protocol.pids import FormulaError, KwpLocalTable, PidDatabase, SensorReading
 from .protocol.kwp2000 import (
     ConnectionInfo,
     EcuInfo,
@@ -112,12 +112,16 @@ class DiagnosticService:
         protocol: str = PROTOCOL_AUTO,
         client: Optional[object] = None,
         pids: Optional[PidDatabase] = None,
+        kwp_local: Optional[KwpLocalTable] = None,
         progress: Optional[Logger] = None,
     ):
         self.transport = transport
         self.config = config
         self.db = db or DtcDatabase.load_default()
         self.pids = pids or PidDatabase.load_default()
+        # The KWP/Keihin packed-frame channel table (its own data file); used
+        # only on the ``kwp_local`` live path, but loaded up front like ``pids``.
+        self.kwp_local = kwp_local or KwpLocalTable.load_default()
         self._logger = logger or (lambda _m: None)
         # Connect-progress hook: called with each protocol label *before* it's
         # probed, so a UI can show which one the auto-sweep is currently trying.
@@ -324,7 +328,7 @@ class DiagnosticService:
                 return []
             kwp_table = None
             if getattr(client, "live_source", "obd_mode01") == "kwp_local":
-                kwp_table = self.pids.kwp_local
+                kwp_table = self.kwp_local
                 if kwp_table is None:
                     return []
                 frame = read([kwp_table.lid]).get(kwp_table.lid)

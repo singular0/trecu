@@ -30,7 +30,7 @@ Built and tested (31 tests, all against the mock ECUs):
 
 So **Phase 1 is done**, **Phase 2 is done**, the **F1 foundation is done**, and
 **Phase 3 (live-data streaming) is done** on the confirmed OBD path — plus the
-first slice of **F2** (`triumph_pids.json`).
+first slice of **F2** (`obd_sensors.json` + `keihin_sensors.json`).
 
 ---
 
@@ -66,13 +66,14 @@ the persistent session is the TUI/continuous path.
 code. Live-data PIDs/record layouts, actuator routine IDs, and memory maps are
 all model/ECU-specific in exactly the same way. Extend the `data/` +
 `@dataclass` config approach (per `CLAUDE.md`) rather than hardcoding — one file
-per concern (e.g. `triumph_pids.json`, `triumph_actuators.json`).
+per concern (e.g. `obd_sensors.json`, `keihin_sensors.json`, `triumph_actuators.json`).
 
-Delivered: **`data/triumph_pids.json`** — the standardized OBD **Mode 01** PID
-set (name, group, unit, byte count, SAE J1979 formula, gauge bounds) *and* the
-**`kwp_local` section**: a community-reverse-engineered 53-channel Keihin
-sensor table (names/kind/decimals/offset/fullscale from that community-sourced
-data), wired into decoding as `PidDatabase.kwp_local` / `decode_frame` over the
+Delivered: **`data/obd_sensors.json`** — the standardized OBD **Mode 01** PID
+set (name, group, unit, byte count, SAE J1979 formula, gauge bounds), loaded as
+`PidDatabase` — *and* its own **`data/keihin_sensors.json`**: a
+community-reverse-engineered 53-channel Keihin sensor table
+(names/kind/decimals/offset/fullscale from that community-sourced data), loaded
+as a separate `KwpLocalTable` and wired into decoding via `decode_frame` over the
 one packed `21 80` frame. Its frame layout and divisors are a **draft** pending
 an F4 capture — fixing them is a data-only edit. Also delivered (2026-07):
 **`data/triumph_dtc.json` replaced wholesale** with a community-sourced
@@ -162,7 +163,7 @@ Delivered:
 
 - **Sensor-decode layer** (`protocol/pids.py`): `PidDatabase` +
   `SensorReading`, formulas evaluated by a restricted interpreter (no `eval`),
-  backed by `triumph_pids.json` (F2).
+  backed by `obd_sensors.json` / `keihin_sensors.json` (F2).
 - **`read_live(pids)`** on both duck-typed clients and on `DiagnosticService`
   (serialized on `_io_lock`, decodes to ordered `SensorReading`s). Defaults:
   `DEFAULT_LIVE_PIDS` (RPM, coolant, TPS, MAP, O2, battery) + `DEFAULT_POLL_INTERVAL`.
@@ -453,7 +454,7 @@ so the real cadence is ~1–2 Hz.)
 - **Serialization:** every view's ECU traffic funnels through that single
   session actor — the half-duplex constraint enforced in code, not just
   honored by convention. Tab switches pause/resume the poll loop.
-- **Sensor-decode layer + `triumph_pids.json`** (Phase 3 / F2): id, name, unit,
+- **Sensor-decode layer + `obd_sensors.json` / `keihin_sensors.json`** (Phase 3 / F2): id, name, unit,
   formula, **and gauge bounds**.
 - **Mocks must emit *varying* values** or the live view looks dead.
 

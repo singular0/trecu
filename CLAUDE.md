@@ -76,10 +76,11 @@ uses **ReadDataByLocalIdentifier** (0x21). Both return *raw* data bytes per
 requested id (an id the ECU doesn't answer is simply omitted) — decoding to
 physical values is the service's job via the sensor-decode layer, not the
 client's. Each client also carries two decode-steering attributes the service
-reads: `live_source` (`"obd_mode01"` vs `"kwp_local"`) names which
-`triumph_pids.json` section decodes its live data — on the KWP path the service
-requests the **one packed `21 80` frame** (the Keihin MODE_READ_SENSORS RLI) and
-splits it per the `kwp_local` channel table — and `dtc_family` (`None` vs a
+reads: `live_source` (`"obd_mode01"` vs `"kwp_local"`) names which decode table
+(`obd_sensors.json` vs `keihin_sensors.json`) decodes its live data — on the KWP
+path the service requests the **one packed `21 80` frame** (the Keihin
+MODE_READ_SENSORS RLI) and splits it per the `kwp_local` channel table — and
+`dtc_family` (`None` vs a
 letter like `"K"`) selects the DTC labelling scheme, because Keihin `0x18`
 responses carry **raw fault numbers that are not SAE-J2012 bit-encoded**.
 `keepalive()` holds a persistent session open (F1):
@@ -141,7 +142,7 @@ recorded in `timing_params`, ident on the Keihin RLIs) — same sync rule vs.
 testable — those VIN/calibration strings are invented, not real-bike facts.
 Both also answer **live-data** requests (Phase 3) with plausible, *moving*
 values from `transport/_mock_live.py`, whose encoders are the inverse of the
-`triumph_pids.json` formulas — keep them in sync. The OBD mock answers per-PID
+`obd_sensors.json` / `keihin_sensors.json` formulas — keep them in sync. The OBD mock answers per-PID
 (an unmodelled PID gets no reply, so `read_live` omits it); the K-line mock
 serves only LID `0x80` — one packed frame in the draft `kwp_local` layout
 (`kwp_live_frame`), a handful of channels moving and the rest zero — and
@@ -169,19 +170,20 @@ the JSON, don't hardcode; an unknown code still decodes and shows a generic
 message.
 
 **Sensor decoding (`protocol/pids.py`)** is the Phase 3 parallel to `dtc.py`: it
-turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using the
-model-value table in `data/triumph_pids.json` (F2). Each PID carries a **formula**
+turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using
+two model-value tables under `data/`, one per live path (F2). Each PID carries a **formula**
 — an expression over the data bytes `A, B, C, D` (A = first byte, big-endian) as
 SAE J1979 writes it — evaluated by a tiny arithmetic interpreter (`compile_formula`)
 restricted to `+ - * /`, unary sign, parens, and those four names; **never Python
-`eval`**. A bad formula raises `FormulaError` at *load*, not mid-poll. The
-`obd_mode01` section holds the standardized OBD PIDs (the confirmed path); the
-`kwp_local` section is a community-reverse-engineered 53-channel Keihin table,
-loaded as `PidDatabase.kwp_local` (a `KwpLocalTable`): channel keys are
-*decimal* indices from that table, each entry carries `frame_offset`/`bytes`
-locating it inside the one packed `21 80` frame, and `decode_frame` splits
-such a frame into readings.
-**The kwp_local layout and divisors are a DRAFT** (see its `_status` key):
+`eval`**. A bad formula raises `FormulaError` at *load*, not mid-poll.
+`obd_sensors.json` holds the standardized OBD PIDs (the confirmed path), a flat
+`{hex-pid: entry}` map loaded as `PidDatabase`; `keihin_sensors.json` is a
+community-reverse-engineered 53-channel Keihin table loaded as a **separate**
+`KwpLocalTable` (the service holds it as `self.kwp_local`, alongside `self.pids`):
+channel keys are *decimal* indices from that table, each entry carries
+`frame_offset`/`bytes` locating it inside the one packed `21 80` frame, and
+`decode_frame` splits such a frame into readings.
+**The kwp_local layout and divisors are a DRAFT**:
 names/kind/decimals/offset/fullscale come from that community-sourced data, but the real
 per-channel divisors and frame byte offsets need an F4 hardware capture —
 fixing them is a data-only JSON edit. `DiagnosticService.read_live(pids=None)`

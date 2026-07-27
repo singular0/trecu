@@ -2,8 +2,10 @@
 
 Parallel to :mod:`trecu.protocol.dtc`: where ``dtc.py`` turns DTC byte triples
 into SAE J2012 codes + descriptions, this turns a PID's raw data bytes into a
-physical value using the model-value table in ``trecu/data/triumph_pids.json``
-(roadmap F2). It is the "sensor-decode layer" Phase 3 slots in below the service.
+physical value using the model-value tables in ``trecu/data/`` — the
+standardized OBD PIDs in ``obd_sensors.json`` and the Triumph Keihin
+packed-frame channels in ``keihin_sensors.json`` (roadmap F2). It is the
+"sensor-decode layer" Phase 3 slots in below the service.
 
 Each PID descriptor carries a **formula** — an expression over the data bytes
 ``A, B, C, D`` (A = first data byte, big-endian) exactly as SAE J1979 and the
@@ -37,6 +39,14 @@ _BIN_OPS = {
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 Env = Dict[str, int]
+
+
+def _load_data_json(name: str) -> dict:
+    """Load a bundled ``trecu/data/*.json`` decode table."""
+    with resources.files("trecu.data").joinpath(name).open(
+        "r", encoding="utf-8"
+    ) as fh:
+        return json.load(fh)
 
 
 class FormulaError(ValueError):
@@ -146,10 +156,10 @@ class KwpLocalTable:
     ReadDataByLocalIdentifier request (``21 80``); the response is one frame
     with each channel at a fixed byte offset. This table maps channel index ->
     :class:`PidDef` (whose ``frame_offset``/``num_bytes`` locate it in the
-    frame) and splits such a frame into :class:`SensorReading`\\ s. The bundled
-    layout, divisors, and offsets are a **draft** pending a hardware capture of
-    a real ``21 80`` response (roadmap F4) — fixing them is a data-only edit to
-    ``triumph_pids.json``.
+    frame) and splits such a frame into :class:`SensorReading`\\ s. Backed by
+    its own ``trecu/data/keihin_sensors.json``; the bundled layout, divisors,
+    and offsets are a **draft** pending a hardware capture of a real ``21 80``
+    response (roadmap F4) — fixing them is a data-only edit to that file.
     """
 
     def __init__(self, lid: int, defs: Dict[int, PidDef]):
@@ -157,9 +167,18 @@ class KwpLocalTable:
         self._defs = defs
 
     @classmethod
+    def load_default(cls) -> "KwpLocalTable":
+        return cls.from_dict(_load_data_json("keihin_sensors.json"))
+
+    @classmethod
+    def load_file(cls, path: str) -> "KwpLocalTable":
+        with open(path, "r", encoding="utf-8") as fh:
+            return cls.from_dict(json.load(fh))
+
+    @classmethod
     def from_dict(cls, section: dict) -> "KwpLocalTable":
         # Channel keys are *decimal* Keihin channel indices (0..98, gappy) —
-        # unlike obd_mode01's hex PID keys.
+        # unlike mode01's hex PID keys.
         defs = {
             int(key): PidDef.from_entry(int(key), entry)
             for key, entry in section.get("channels", {}).items()
@@ -210,23 +229,18 @@ class KwpLocalTable:
 class PidDatabase:
     """Lookup table mapping PID numbers to :class:`PidDef` decoders.
 
-    Backed by ``trecu/data/triumph_pids.json``. The ``obd_mode01`` section holds
-    the standardized SAE J1979 PIDs (the confirmed ISO 9141-2 / OBD path); the
-    ``kwp_local`` section — exposed as the :attr:`kwp_local`
-    :class:`KwpLocalTable` (``None`` when absent) — holds the Triumph Keihin
-    packed-frame channels for the KWP path.
+    Backed by ``trecu/data/obd_sensors.json`` — the standardized SAE J1979 PIDs
+    for the confirmed ISO 9141-2 / OBD path (a flat ``{hex-pid: entry}`` map).
+    The Triumph Keihin packed-frame channels for the KWP path are a separate
+    concern, loaded from their own file into :class:`KwpLocalTable`.
     """
 
     def __init__(self, defs: Optional[Dict[int, PidDef]] = None):
         self._defs: Dict[int, PidDef] = defs or {}
-        self.kwp_local: Optional[KwpLocalTable] = None
 
     @classmethod
     def load_default(cls) -> "PidDatabase":
-        with resources.files("trecu.data").joinpath("triumph_pids.json").open(
-            "r", encoding="utf-8"
-        ) as fh:
-            return cls.from_dict(json.load(fh))
+        return cls.from_dict(_load_data_json("obd_sensors.json"))
 
     @classmethod
     def load_file(cls, path: str) -> "PidDatabase":
@@ -235,16 +249,12 @@ class PidDatabase:
 
     @classmethod
     def from_dict(cls, data: dict) -> "PidDatabase":
-        section = data.get("obd_mode01", data)
+        # ``data`` is a flat ``{hex-pid: entry}`` map (the whole file).
         defs: Dict[int, PidDef] = {}
-        for key, entry in section.items():
+        for key, entry in data.items():
             pid = int(key, 16)
             defs[pid] = PidDef.from_entry(pid, entry)
-        db = cls(defs)
-        kwp = data.get("kwp_local")
-        if isinstance(kwp, dict) and kwp.get("channels"):
-            db.kwp_local = KwpLocalTable.from_dict(kwp)
-        return db
+        return cls(defs)
 
     def __len__(self) -> int:
         return len(self._defs)

@@ -8,9 +8,10 @@ tests — and this module is that single source of truth.
 
 Values are deterministic functions of a ``tick`` counter (a smooth sine wobble
 around a realistic base), so tests can assert ranges and movement without
-wall-clock flakiness. Each encoder is the **inverse** of the SAE J1979 formula
-in ``triumph_pids.json`` — keep the two in sync (this mirrors the DTC mock/DB
-sync note in ``CLAUDE.md``).
+wall-clock flakiness. Each encoder is the **inverse** of the decode formula in
+the matching ``trecu/data/`` table (``obd_sensors.json`` for the OBD sensors,
+``keihin_sensors.json`` for the Keihin channels) — keep the two in sync (this
+mirrors the DTC mock/DB sync note in ``CLAUDE.md``).
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ _SENSORS: Dict[int, Tuple[float, float, float, Callable[[float], bytes]]] = {
 # Keihin packed live frame (kwp_local, the KWP path): the Keihin
 # MODE_READ_SENSORS RLI (21 80) answers with *every* channel in one frame. Slot
 # positions and encoders here are the inverse of the draft kwp_local
-# layout/formulas in ``triumph_pids.json`` (sequential 2-byte big-endian slots
+# layout/formulas in ``keihin_sensors.json`` (sequential 2-byte big-endian slots
 # in listed order) — keep the two in sync. Unmodelled slots stay zero, which
 # still decodes (to the channel's offset), like a quiescent sensor.
 _KWP_FRAME_SLOTS = 53
