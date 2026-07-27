@@ -94,7 +94,7 @@ def test_connecting_modal_cancel_abandons_connect():
             await pilot.press("enter")  # Cancel button is focused
             await pilot.pause(0.1)
             assert not isinstance(app.screen, ConnectingScreen)
-            assert app._state == "ready"
+            assert app._state == "disconnected"
             # Release the stalled handshake: the abandoned session that the
             # connect thread finishes building must be torn down, not kept.
             gate.set()
@@ -185,7 +185,7 @@ def test_connect_error_modal_returns_to_ready_without_lister():
             await pilot.press("enter")           # OK
             await pilot.pause(0.2)
             assert not isinstance(app.screen, ConnectErrorScreen)
-            assert app._state == "ready"
+            assert app._state == "disconnected"
             assert app._session is None
 
     asyncio.run(scenario())

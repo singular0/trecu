@@ -194,8 +194,10 @@ KWP path `pids` are channel indices and `None` means every channel.
 
 **TUI layout (`tui/app.py`) is a one-row session "spine" over a
 `TabbedContent` body.** The spine shows the brand on the left and, right-aligned,
-a colored liveness dot + state label (`ready`/`connecting`/`reading`/`clearing`/
-`connected`/`error`, keyed off `_SPINE`). The **Faults tab itself is the fault
+a colored liveness dot + state label (`disconnected`/`connecting`/`reading`/
+`clearing`/`connected`/`error`, keyed off `_SPINE`, hex-colored; grey when
+disconnected, yellow while connecting, dim green connected, bright green during
+a read/clear, red on error). The **Faults tab itself is the fault
 indicator** — `_mark_faults_tab` toggles a `-has-faults` class (CSS `color:
 $error; text-style: bold`) on the tab so its label turns red whenever the last
 read found stored codes (there is no separate MIL lamp in the spine). The body
@@ -214,8 +216,8 @@ lazily on the first read (`_ensure_session`), connected once and held open with
 a background keepalive ticker; re-reads and clears reuse it instead of
 re-initialising the K-line per keypress. A failed operation tears the session
 down (`_close_session`) so the next read reconnects cleanly; `on_unmount` closes
-it on exit. The spine shows a green `⚡` keepalive lamp while a session is live,
-and reads `streaming N sensors` (or `frozen`) while the Live Data poll loop runs.
+it on exit. While the Live Data poll loop runs the dot reads `streaming...`
+(bright green) or `frozen` (blue).
 A **fresh** connect (session is `None`) runs behind a `ConnectingScreen` modal —
 a standard `LoadingIndicator` spinner + Cancel button (`_connect_with_modal`);
 re-reads over the held session skip it. The modal names the **target port** and

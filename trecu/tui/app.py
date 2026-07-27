@@ -73,13 +73,12 @@ TransportForPort = Callable[[str], Transport]
 
 # Session state -> (dot colour, glyph, label) for the spine.
 _SPINE = {
-    "ready": ("grey62", "○", "ready"),
-    "select": ("grey62", "○", "select a port"),
-    "connecting": ("yellow", "●", "connecting..."),
-    "reading": ("yellow", "●", "reading..."),
-    "clearing": ("yellow", "●", "clearing codes..."),
-    "connected": ("green", "●", "connected"),
-    "error": ("red", "●", "error"),
+    "disconnected": ("#9ca3af", "○", "disconnected"),
+    "connecting": ("#eab308", "●", "connecting..."),
+    "reading": ("#4ade80", "●", "reading..."),
+    "clearing": ("#4ade80", "●", "clearing codes..."),
+    "connected": ("#16a34a", "●", "connected"),
+    "error": ("#ef4444", "●", "error"),
 }
 
 
@@ -339,12 +338,11 @@ class TrecuApp(App):
         # None = let the service pick the source-appropriate default set (OBD
         # DEFAULT_LIVE_PIDS, or every kwp_local channel on the KWP path).
         self._live_pids = list(live_pids) if live_pids is not None else None
-        self._live_count = 0
         self._port = port or ("mock ECU" if mock else None)
         # Used only when no port is known yet and the user must choose one.
         self._list_ports = list_ports
         self._transport_for_port = transport_for_port
-        self._state = "ready"
+        self._state = "disconnected"
         self._last: Optional[ReadResult] = None
         # F1: one long-lived session, connected once and held open with a
         # keepalive ticker — reused across reads/clears instead of the old
@@ -411,7 +409,7 @@ class TrecuApp(App):
             Text.from_markup("[dim]Not connected.[/]")
         )
         self._refresh_connection_card()
-        self._set_state("ready")
+        self._set_state("disconnected")
         if self._verbose:
             self.action_show_tab("tab-log")
         if self._transport_factory is not None:
@@ -423,7 +421,7 @@ class TrecuApp(App):
         else:
             # No definite port yet — ask the user to choose one.
             self._append_log("Multiple/no serial ports — choose one to begin.")
-            self._set_state("select")
+            self._set_state("disconnected")
             self.call_after_refresh(self._choose_port)
 
     # -- spine (persistent session status) -----------------------------------
@@ -432,16 +430,13 @@ class TrecuApp(App):
         self._refresh_spine()
 
     def _refresh_spine(self) -> None:
-        color, dot, label = _SPINE.get(self._state, _SPINE["ready"])
+        color, dot, label = _SPINE.get(self._state, _SPINE["disconnected"])
         # While the poll loop is running, the spine reports what the session is
-        # actually doing: streaming N sensors (or frozen on the last snapshot).
+        # actually doing: streaming (bright green) or frozen (blue).
         if self._streaming and self._state == "connected":
-            n = self._live_count
-            label = "frozen" if self._live_frozen else f"streaming {n} sensors"
-        # Keepalive lamp: the session is held open by a TesterPresent ticker.
-        live_or_conn = self._state == "connected" or self._streaming
-        ka = "[green]⚡[/] " if (self._session is not None and live_or_conn) else ""
-        conn = f"{ka}[{color}]{dot}[/] [b]{label}[/]"
+            color = "#3b82f6" if self._live_frozen else "#4ade80"
+            label = "frozen" if self._live_frozen else "streaming..."
+        conn = f"[{color}]{dot}[/] [b]{label}[/]"
         self.query_one("#conn", Static).update(Text.from_markup(conn))
 
     # -- helpers -------------------------------------------------------------
@@ -610,7 +605,6 @@ class TrecuApp(App):
             still_live = False
         if not still_live:
             return
-        self._live_count = len(readings)
         self._update_live_table(readings)
         self._streaming = True
         if self._state != "connected":
@@ -808,7 +802,7 @@ class TrecuApp(App):
         if self._list_ports is not None:
             self._choose_port()
         else:
-            self._set_state("ready")
+            self._set_state("disconnected")
 
     def _do_connect(self, svc: DiagnosticService) -> None:
         """Worker-thread body: open + connect ``svc`` (blocking)."""
@@ -877,7 +871,7 @@ class TrecuApp(App):
         if self._list_ports is not None:
             self._choose_port()
         else:
-            self._set_state("ready")
+            self._set_state("disconnected")
 
     # -- actions -------------------------------------------------------------
     @work(exclusive=True, group="ecu")
