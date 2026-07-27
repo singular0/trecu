@@ -7,12 +7,23 @@ populating the Live Data tab.
 """
 
 import asyncio
+import time
 
 from trecu.protocol.iso9141 import Iso9141Client
 from trecu.protocol.kwp2000 import Kwp2000Client
 from trecu.service import DEFAULT_LIVE_PIDS, DiagnosticService
 from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
+
+
+async def _wait_for(pilot, cond, timeout=5.0):
+    """Pause until an off-thread TUI operation satisfies ``cond``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError("condition not met within timeout")
 
 
 # -- client-level read_live --------------------------------------------------
@@ -105,8 +116,8 @@ def test_mock_values_move_between_reads():
 def test_tui_live_tab_streams():
     from trecu.tui.app import TrecuApp
 
-    # A small PID set keeps one snapshot fast (each PID is a real, paced K-line
-    # round-trip in the mock, ~0.1 s), so the poll completes within the pause.
+    # A small PID set keeps the test fast while still exercising multiple real,
+    # paced K-line round-trips through the mock.
     live_pids = [0x0C, 0x05, 0x11]
     app = TrecuApp(
         transport_factory=lambda: MockObdTransport(),
@@ -120,15 +131,18 @@ def test_tui_live_tab_streams():
 
     async def scenario():
         async with app.run_test() as pilot:
-            await pilot.pause(0.3)          # auto-read on mount builds the session
+            # The mount-triggered read and live snapshots both run off-thread.
+            # Wait on their observable results rather than assuming CI scheduling
+            # will complete them within a fixed sleep.
+            await _wait_for(pilot, lambda: app._state == "connected")
             app.action_show_tab("tab-live")  # entering Live Data starts polling
-            await pilot.pause(0.8)           # let a full snapshot land
             table = app.query_one("#live")
+            await _wait_for(pilot, lambda: table.row_count == len(live_pids))
             assert table.row_count == len(live_pids)
             assert app._streaming is True
             # Leaving the tab pauses the stream.
             app.action_show_tab("tab-faults")
-            await pilot.pause(0.1)
+            await _wait_for(pilot, lambda: not app._streaming)
             assert app._streaming is False
 
     asyncio.run(scenario())
