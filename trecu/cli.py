@@ -9,7 +9,7 @@ from typing import List, Optional
 from . import __version__
 from .protocol.dtc import DtcDatabase
 from .protocol.iso9141 import Iso9141Config
-from .protocol.kwp2000 import Kwp2000Config, ProtocolError
+from .protocol.kwp2000 import STATUS_CONFIRMED, Kwp2000Config, ProtocolError
 from .service import (
     PROTOCOL_AUTO,
     PROTOCOL_ISO9141,
@@ -31,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
     conn = p.add_argument_group("connection")
     conn.add_argument("-p", "--port", help="serial port (e.g. /dev/ttyUSB0, /dev/cu.usbserial-XXXX, or COM3)")
     conn.add_argument("--baud", type=int, default=10400, help="K-line baud rate (default 10400)")
-    conn.add_argument("--mock", action="store_true", help="use a simulated ECU (no hardware)")
+    conn.add_argument("--mock", action="store_true", help=argparse.SUPPRESS)
     conn.add_argument(
         "--protocol",
         choices=[PROTOCOL_AUTO, PROTOCOL_ISO9141, PROTOCOL_KWP_SLOW, PROTOCOL_KWP_FAST],
@@ -77,17 +77,22 @@ def _make_config(args: argparse.Namespace):
 
 def _make_transport(args: argparse.Namespace) -> Transport:
     if args.mock:
+        # Seed the simulated ECU with a random, type-varied set of real DB codes
+        # so `--mock` shows a plausible spread of faults, not one canned code.
+        pairs = _load_db(args).random_dtcs()
         if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
             from .transport.mock_kline import MockKLineTransport
 
+            triples = [(hi, lo, STATUS_CONFIRMED) for hi, lo in pairs]
             return MockKLineTransport(
+                dtcs=triples or None,
                 ecu_address=args.ecu_address,
                 tester_address=args.tester_address,
                 supports_slow_init=(args.protocol == PROTOCOL_KWP_SLOW),
             )
         from .transport.mock_obd import MockObdTransport
 
-        return MockObdTransport(init_address=args.init_address)
+        return MockObdTransport(init_address=args.init_address, dtcs=pairs or None)
     from .transport.serial_kline import KLineSerialTransport
 
     port = args.port or _autodetect_port()

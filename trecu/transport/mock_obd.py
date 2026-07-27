@@ -2,8 +2,11 @@
 
 Mirrors the real bike observed over the KKL cable: 5-baud init at 0x33, key
 bytes 08 08, and OBD Mode 01/03/04 with the ``48 6B ..`` response header.  The
-default stored fault is P1108 with the MIL on, so ``trecu --mock`` demonstrates
-the real-world scenario end to end.
+default stored fault (constructed with no ``dtcs=``) is the single real-bike
+P1108 with the MIL on — the deterministic ground truth the test-suite relies
+on.  The ``trecu --mock`` CLI overrides that with a random, type-varied set of
+real DB codes (``DtcDatabase.random_dtcs``) so a demo run shows a plausible
+spread of faults rather than one canned code.
 """
 
 from __future__ import annotations
@@ -109,11 +112,15 @@ class MockObdTransport(Transport):
                     self._live_tick += 1
                     self._emit(bytes((0x41, pid)) + data)
         elif mode == 0x03:  # stored DTCs
+            # Serve *every* stored DTC (padded to a 3-pair frame when there are
+            # fewer): the client reconciles this against the Mode 01 PID 01
+            # count, so capping the list here would make a >3-fault read look
+            # like a count/enumeration mismatch.
             body = bytearray((0x43,))
             slots = list(self._dtcs)
             while len(slots) < 3:
                 slots.append((0x00, 0x00))
-            for hi, lo in slots[:3]:
+            for hi, lo in slots:
                 body += bytes((hi, lo))
             self._emit(bytes(body))
         elif mode == 0x04:  # clear DTCs + MIL

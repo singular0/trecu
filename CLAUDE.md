@@ -131,9 +131,16 @@ branches on them rather than on concrete types:
 
 **Two mock ECUs, one per protocol path** (`transport/mock_obd.py`,
 `transport/mock_kline.py`). `MockObdTransport` is the default `--mock` and emulates the
-real bike observed over the cable: 5-baud init, key bytes `08 08`, one stored
-`P1108` with MIL on. It's the ground truth for the iso9141 path — if you change
-that client, update this mock to match and vice versa. `MockKLineTransport`
+real bike observed over the cable: 5-baud init, key bytes `08 08`, and — with no
+`dtcs=` — one stored `P1108` with MIL on. That single-fault default is the
+deterministic ground truth for the iso9141 path (tests assert it; if you change
+that client, update this mock to match and vice versa), but the **`--mock` CLI
+seeds each mock with a random, type-varied fault set** from
+`DtcDatabase.random_dtcs` (see the DTC-decoding section) so a demo run shows a
+plausible spread rather than one canned code — hence the OBD mock's Mode 03
+serves *every* stored DTC (padded to a 3-pair frame when fewer), never capping
+at three, so a >3-fault read still reconciles against the Mode 01 PID 01 count.
+`MockKLineTransport`
 mirrors the community-documented Keihin K-line ECU (address `D5`/`F5`, DTCs via
 OBD Mode 03 over KWP framing *and* legacy `0x18`, AccessTimingParameter
 recorded in `timing_params`, ident on the Keihin RLIs) — same sync rule vs.
@@ -167,7 +174,11 @@ ReadDTCByStatus responses, whose fault numbers are **not** J2012 bit-encoded
 from the official-service-manual wording in a community-sourced extract (557 codes:
 360 `P`, 134 `K`, 30 `C`, 25 `U`, 8 `L`). Codes vary by model/year — extend
 the JSON, don't hardcode; an unknown code still decodes and shows a generic
-message.
+message. `encode_dtc_code` is the inverse of the *structural* decode (`"P1108"`
+→ `(0x11, 0x08)`; only `P/C/B/U` with a first digit `0-3` round-trip, else
+`ValueError`), and `DtcDatabase.random_dtcs` uses it to draw a random,
+family-varied set of real DB codes as byte pairs — the seed for the random
+`--mock` fault set.
 
 **Sensor decoding (`protocol/pids.py`)** is the Phase 3 parallel to `dtc.py`: it
 turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using

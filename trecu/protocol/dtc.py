@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass, field
 from importlib import resources
-from typing import Iterable
+from typing import Iterable, Optional
 
 # First two bits of the high byte select the code's letter (SAE J2012).
 _DTC_LETTERS = ("P", "C", "B", "U")
@@ -47,6 +48,29 @@ def decode_dtc_bytes(high: int, low: int, family: str | None = None) -> str:
     d3 = (low >> 4) & 0x0F
     d4 = low & 0x0F
     return f"{letter}{d1}{d2:X}{d3:X}{d4:X}"
+
+
+def encode_dtc_code(code: str) -> tuple[int, int]:
+    """Inverse of :func:`decode_dtc_bytes` for the structural (``family=None``) scheme.
+
+    ``"P1108"`` -> ``(0x11, 0x08)``. Only SAE J2012 ``P/C/B/U`` codes whose first
+    digit is ``0-3`` round-trip; anything else (a ``K``/``L`` family code, a
+    first digit above 3, non-hex digits, wrong length) has no byte pair that
+    decodes back to it, and raises :class:`ValueError`.
+    """
+    if len(code) != 5:
+        raise ValueError(f"not a 4-digit DTC: {code!r}")
+    letter = code[0].upper()
+    if letter not in _DTC_LETTERS:
+        raise ValueError(f"not a structural DTC letter (P/C/B/U): {code!r}")
+    idx = _DTC_LETTERS.index(letter)
+    try:
+        d1, d2, d3, d4 = (int(c, 16) for c in code[1:])
+    except ValueError:
+        raise ValueError(f"non-hex DTC digits: {code!r}") from None
+    if d1 > 3:
+        raise ValueError(f"first digit must be 0-3 to encode: {code!r}")
+    return (idx << 6) | (d1 << 4) | d2, (d3 << 4) | d4
 
 
 def decode_status(status: int) -> list[str]:
@@ -118,6 +142,59 @@ class DtcDatabase:
     ) -> Dtc:
         code = decode_dtc_bytes(high, low, family)
         return Dtc(code=code, status=status, description=self.describe(code), raw=raw)
+
+    def _structural_codes_by_family(self) -> dict[str, list[str]]:
+        """DB codes that round-trip through the structural decode, grouped by letter.
+
+        Only these can seed a mock ECU: the bike answers with raw bytes, so a
+        seed code is usable only if :func:`encode_dtc_code` /
+        :func:`decode_dtc_bytes` round-trips it back to a code the DB describes.
+        """
+        by_family: dict[str, list[str]] = {}
+        for code in self._entries:
+            try:
+                high, low = encode_dtc_code(code)
+            except ValueError:
+                continue
+            if decode_dtc_bytes(high, low) != code:
+                continue
+            by_family.setdefault(code[0].upper(), []).append(code)
+        return by_family
+
+    def random_dtcs(
+        self,
+        *,
+        rng: Optional[random.Random] = None,
+        min_count: int = 2,
+        max_count: int = 6,
+    ) -> list[tuple[int, int]]:
+        """Pick a random, type-varied set of DTC byte pairs from the database.
+
+        Lets ``--mock`` show a plausible spread of stored faults instead of the
+        single canned code: a random count in ``[min_count, max_count]`` of
+        distinct codes, each chosen by first picking a family uniformly so the
+        letters (P/C/B/U) actually vary rather than being swamped by the huge P
+        range. Every pair decodes back — via the structural
+        :func:`decode_dtc_bytes` — to a code the DB describes, so the mock's
+        faults read like real ones. Returns ``[]`` if the DB has no structural
+        codes to draw from.
+        """
+        rng = rng or random
+        by_family = self._structural_codes_by_family()
+        total = sum(len(codes) for codes in by_family.values())
+        if total == 0:
+            return []
+        families = list(by_family)
+        hi_count = min(max_count, total)
+        count = rng.randint(min(min_count, hi_count), hi_count)
+        chosen: list[str] = []
+        seen: set[str] = set()
+        while len(chosen) < count:
+            code = rng.choice(by_family[rng.choice(families)])
+            if code not in seen:
+                seen.add(code)
+                chosen.append(code)
+        return [encode_dtc_code(code) for code in chosen]
 
     def decode_all(
         self, triples: Iterable[tuple[int, int, int]], family: str | None = None
