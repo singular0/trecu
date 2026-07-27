@@ -150,7 +150,8 @@ def _print_dtcs(result) -> None:
     if not result.dtcs:
         console.print("[green]No stored fault codes.[/green]")
         return
-    table = Table(title=f"{result.count} stored fault code(s)")
+    noun = "code" if result.count == 1 else "codes"
+    table = Table(title=f"{result.count} stored fault {noun}")
     table.add_column("Code", style="bold red")
     table.add_column("Status")
     table.add_column("Description")

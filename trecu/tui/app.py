@@ -281,6 +281,9 @@ class TrecuApp(App):
         padding: 1 2;
         margin: 0 1;
     }
+    /* Faults tab turns red when the last read found stored codes (replaces
+       the old spine MIL lamp). Keep the active-tab underline visible. */
+    Tab.-has-faults { color: $error; text-style: bold; }
     #dtcs { height: 1fr; }
     #dtcs > .datatable--cursor { background: $accent; }
     #live { height: 1fr; }
@@ -435,12 +438,10 @@ class TrecuApp(App):
         if self._streaming and self._state == "connected":
             n = self._live_count
             label = "frozen" if self._live_frozen else f"streaming {n} sensors"
-        # Synthetic MIL lamp: red dot only when the ECU reports stored faults.
-        mil = "[red]●[/]  " if (self._last and self._last.count) else ""
         # Keepalive lamp: the session is held open by a TesterPresent ticker.
         live_or_conn = self._state == "connected" or self._streaming
         ka = "[green]⚡[/] " if (self._session is not None and live_or_conn) else ""
-        conn = f"{mil}{ka}[{color}]{dot}[/] [b]{label}[/]"
+        conn = f"{ka}[{color}]{dot}[/] [b]{label}[/]"
         self.query_one("#conn", Static).update(Text.from_markup(conn))
 
     # -- helpers -------------------------------------------------------------
@@ -648,18 +649,34 @@ class TrecuApp(App):
         empty = self.query_one("#empty", Static)
         table.display = bool(result.count)
         empty.display = not result.count
+        self._mark_faults_tab(bool(result.count))
         self._update_faults_card(result)
         self._refresh_connection_card()
         self._update_identity_card(result)
         self._set_state("connected")
         proto = f" via {result.protocol}" if result.protocol else ""
-        self._append_log(f"read complete: {result.count} fault code(s){proto}")
+        noun = "code" if result.count == 1 else "codes"
+        self._append_log(f"read complete: {result.count} fault {noun}{proto}")
+
+    def _mark_faults_tab(self, has_faults: bool) -> None:
+        """Tint the Faults tab red when the last read found stored codes.
+
+        Replaces the old spine MIL lamp: the tab itself is the fault indicator.
+        Styled via the ``-has-faults`` class on the tab (see CSS).
+        """
+        try:
+            tab = self.query_one(TabbedContent).get_tab("tab-faults")
+        except Exception:
+            return  # tabs not mounted yet
+        tab.set_class(has_faults, "-has-faults")
 
     def _update_faults_card(self, result: ReadResult) -> None:
         if not result.count:
             text = "[green]✓  No stored fault codes[/]\n\n[dim]Nothing reported by the ECU.[/]"
         else:
-            lines = [f"[b red]{result.count}[/] stored fault code(s)", ""]
+            # A red MIL dot flags stored faults; the count itself stays neutral.
+            noun = "code" if result.count == 1 else "codes"
+            lines = [f"[red]●[/]  [b]{result.count}[/] stored fault {noun}", ""]
             for dtc in result.dtcs:
                 lines.append(f"[b]{dtc.code}[/]")
             text = "\n".join(lines)

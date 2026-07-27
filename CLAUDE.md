@@ -195,8 +195,11 @@ KWP path `pids` are channel indices and `None` means every channel.
 **TUI layout (`tui/app.py`) is a one-row session "spine" over a
 `TabbedContent` body.** The spine shows the brand on the left and, right-aligned,
 a colored liveness dot + state label (`ready`/`connecting`/`reading`/`clearing`/
-`connected`/`error`, keyed off `_SPINE`) plus a synthetic MIL lamp — a red dot
-that lights only when the last read found stored faults. The body has three
+`connected`/`error`, keyed off `_SPINE`). The **Faults tab itself is the fault
+indicator** — `_mark_faults_tab` toggles a `-has-faults` class (CSS `color:
+$error; text-style: bold`) on the tab so its label turns red whenever the last
+read found stored codes (there is no separate MIL lamp in the spine). The body
+has three
 tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
 identity), **Faults** (the DTC `DataTable` with a centered "no faults" empty
 state), **Live Data** (the Phase 3 streaming `DataTable` — sensor / value / unit
