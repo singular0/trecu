@@ -391,6 +391,7 @@ class TrecuApp(App):
         self._live_frozen = False
         self._streaming = False
         self._live_stats: dict = {}
+        self._live_columns: list = []
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -421,7 +422,20 @@ class TrecuApp(App):
         table.add_columns("Code", "Status", "Description")
         live = self.query_one("#live", DataTable)
         live.cursor_type = "row"
-        live.add_columns("Sensor", "Value", "Unit", "Min", "Max", "Trend")
+        # Keep the column keys: the live table updates rows *in place* (see
+        # _update_live_table) rather than clearing, so it needs them to address
+        # individual cells. The numeric columns get fixed widths so they don't
+        # jitter as values change from tick to tick; the sensor name and the
+        # trend sparkline stay auto-width (the name varies per ECU, and the
+        # sparkline grows toward _HISTORY glyphs as history accumulates).
+        self._live_columns = [
+            live.add_column("Sensor"),
+            live.add_column("Value", width=8),
+            live.add_column("Unit", width=6),
+            live.add_column("Min", width=8),
+            live.add_column("Max", width=8),
+            live.add_column("Trend"),
+        ]
         # Phase 3 poll loop: a repeating timer, created paused and resumed only
         # while the Live Data tab is active (see _sync_live_polling). It kicks a
         # background reader rather than touching the wire on the event loop.
@@ -675,25 +689,36 @@ class TrecuApp(App):
             self._refresh_spine()
 
     def _update_live_table(self, readings: List[SensorReading]) -> None:
+        # Update rows *in place* keyed by PID rather than clearing and rebuilding.
+        # Clearing dropped any PID the ECU skipped this snapshot (it reappeared
+        # only when answered again) and snapped the row cursor back to the top on
+        # every tick. Now a skipped PID keeps its last row, and the cursor stays
+        # put. `_live_stats` tracks exactly the PIDs already given a row (both are
+        # seeded together and reset together in _reset_live_table), so its
+        # membership tells us whether to add a new row or update the existing one.
         table = self.query_one("#live", DataTable)
-        table.clear()  # keeps columns; re-add the (few) rows each snapshot
         for r in readings:
             st = self._live_stats.get(r.pid)
-            if st is None:
+            is_new = st is None
+            if is_new:
                 st = {"min": r.value, "max": r.value, "hist": deque(maxlen=_HISTORY)}
                 self._live_stats[r.pid] = st
             st["min"] = min(st["min"], r.value)
             st["max"] = max(st["max"], r.value)
             st["hist"].append(r.value)
-            table.add_row(
+            cells = (
                 r.name,
                 r.formatted(),
                 r.unit,
                 _fmt_value(st["min"]),
                 _fmt_value(st["max"]),
                 _sparkline(st["hist"]),
-                key=str(r.pid),
             )
+            if is_new:
+                table.add_row(*cells, key=str(r.pid))
+            else:
+                for column, value in zip(self._live_columns, cells):
+                    table.update_cell(str(r.pid), column, value, update_width=True)
 
     # -- rendering results ---------------------------------------------------
     def _populate(self, result: ReadResult) -> None:

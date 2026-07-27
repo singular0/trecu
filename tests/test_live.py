@@ -132,3 +132,64 @@ def test_tui_live_tab_streams():
             assert app._streaming is False
 
     asyncio.run(scenario())
+
+
+def test_live_table_keeps_skipped_pids_and_cursor():
+    """A PID absent from one snapshot keeps its row, and the row cursor holds.
+
+    Regression: the live table used to clear + rebuild every tick, so a PID the
+    ECU skipped that snapshot vanished from the list, and the cursor snapped back
+    to the top row on every update.
+    """
+    from trecu.protocol.pids import SensorReading
+    from trecu.tui.app import TrecuApp
+
+    app = TrecuApp(
+        transport_factory=lambda: MockObdTransport(),
+        mock=True,
+        port="mock",
+        protocol="iso9141",
+        keepalive_interval=0,
+        live_pids=[0x0C, 0x05, 0x11],
+    )
+
+    def snap(values):
+        return [
+            SensorReading(pid=pid, name=name, value=val, unit=unit)
+            for pid, name, val, unit in values
+        ]
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#live")
+            app._update_live_table(
+                snap(
+                    [
+                        (0x0C, "RPM", 1000.0, "rpm"),
+                        (0x05, "Coolant", 80.0, "C"),
+                        (0x11, "Throttle", 12.0, "%"),
+                    ]
+                )
+            )
+            assert table.row_count == 3
+            # Park the cursor on the middle row.
+            table.move_cursor(row=1)
+            assert table.cursor_coordinate.row == 1
+
+            # Next snapshot skips the throttle PID and moves the others.
+            app._update_live_table(
+                snap(
+                    [
+                        (0x0C, "RPM", 2000.0, "rpm"),
+                        (0x05, "Coolant", 81.0, "C"),
+                    ]
+                )
+            )
+            # Nothing disappears; the skipped PID keeps its last row/value.
+            assert table.row_count == 3
+            assert table.cursor_coordinate.row == 1
+            assert table.get_row(str(0x11))[1] == "12"
+            # An answered PID reflects the fresh value in place.
+            assert table.get_row(str(0x0C))[1] == "2000"
+
+    asyncio.run(scenario())
