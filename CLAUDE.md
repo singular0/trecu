@@ -222,11 +222,16 @@ Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
 own arrow bindings are hidden). On each tab switch `_focus_active_tab` focuses
-that tab's primary control (`_TAB_FOCUS`: Faults→`#dtcs`, Live Data→`#live`,
-Log→`#log`) so the row cursor / scroll lands where the user is looking; it
-no-ops on Dashboard (no such control), when a modal owns focus, or when the
-target is hidden (the Faults table gives way to the non-focusable "no faults"
-empty state). **The session is now mechanism, not just framing
+that tab's primary control (`_TAB_FOCUS` maps each tab to an ordered tuple of
+candidate selectors — Dashboard→`#card-faults`, Faults→`#dtcs`/`#empty`, Live
+Data→`#live`, Log→`#log` — and focuses the **first visible** one) so the row
+cursor / scroll lands where the user is looking; it no-ops only when a modal owns
+focus. Focus **must** land inside the newly active pane: the Faults tab lists its
+"no faults" empty state (made focusable in `on_mount`) as the fallback for the
+hidden DTC table precisely because leaving focus stranded in the *outgoing* pane
+lets `TabbedContent`'s focus-follows-pane handler (`_on_tab_pane_focused`, fired
+when Textual relocates focus within the pane it just hid) snap the active tab
+straight back — so e.g. `→` into the empty Faults tab used to silently revert. **The session is now mechanism, not just framing
 (roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
 lazily on the first read (`_ensure_session`), connected once and held open with
 a background keepalive ticker; re-reads and clears reuse it instead of

@@ -323,12 +323,19 @@ class TrecuApp(App):
     # On tab switch, focus the tab's primary control so keyboard input (row
     # cursor, scroll) lands where the user is looking. Dashboard has no natural
     # cursor widget, so its lead summary card is made focusable (see on_mount)
-    # to give the tab a landing spot like the others.
+    # to give the tab a landing spot like the others. Each tab maps to an ordered
+    # tuple of candidates; the first *visible* one wins. The Faults tab lists both
+    # its DTC table and the "no faults" empty state (exactly one is shown at a
+    # time) so focus always lands *inside* the pane even when the table is hidden
+    # — otherwise focus would stay stranded in the outgoing pane, and when
+    # TabbedContent hides that pane Textual relocates focus within it, whose
+    # focus-follows-pane handler snaps the active tab straight back (the switch
+    # appears to do nothing).
     _TAB_FOCUS = {
-        "tab-dashboard": "#card-faults",
-        "tab-faults": "#dtcs",
-        "tab-live": "#live",
-        "tab-log": "#log",
+        "tab-dashboard": ("#card-faults",),
+        "tab-faults": ("#dtcs", "#empty"),
+        "tab-live": ("#live",),
+        "tab-log": ("#log",),
     }
 
     def __init__(
@@ -425,6 +432,10 @@ class TrecuApp(App):
         # across them. The lead card is the tab's focus landing spot (_TAB_FOCUS).
         for card in self.query(".card").results(Static):
             card.can_focus = True
+        # The "no faults" empty state is the Faults tab's focus landing spot when
+        # the DTC table is hidden — without it, focus would be left in the
+        # previous pane and the tab switch would silently revert (see _TAB_FOCUS).
+        self.query_one("#empty", Static).can_focus = True
         self.query_one("#card-faults", Static).border_title = "Faults"
         self.query_one("#card-connection", Static).border_title = "Connection"
         self.query_one("#card-identity", Static).border_title = "ECU identity"
@@ -509,11 +520,13 @@ class TrecuApp(App):
         self._focus_active_tab()
 
     def _focus_active_tab(self) -> None:
-        """Focus the active tab's primary control (see ``_TAB_FOCUS``).
+        """Focus the active tab's first *visible* primary control (``_TAB_FOCUS``).
 
-        No-ops when a modal is on top (don't steal its focus) or when the target
-        is hidden — e.g. the Faults table gives way to the "no faults" empty
-        state, which isn't focusable, so focus is simply left where it is.
+        This must always land focus somewhere inside the newly active pane —
+        leaving it stranded in the outgoing pane lets Textual's focus-follows-pane
+        revert the switch (see the ``_TAB_FOCUS`` note; that's why the Faults tab
+        lists its empty state as a fallback for the hidden table). No-ops only
+        when a modal owns focus.
         """
         if self.screen is not self.screen_stack[0]:
             return  # a modal owns focus right now
@@ -521,15 +534,14 @@ class TrecuApp(App):
             active = self.query_one(TabbedContent).active
         except Exception:
             return
-        selector = self._TAB_FOCUS.get(active)
-        if selector is None:
-            return
-        try:
-            widget = self.query_one(selector)
-        except Exception:
-            return  # pane content not mounted yet
-        if widget.display:
-            widget.focus()
+        for selector in self._TAB_FOCUS.get(active, ()):
+            try:
+                widget = self.query_one(selector)
+            except Exception:
+                continue  # pane content not mounted yet
+            if widget.display:
+                widget.focus()
+                return
 
     def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
         """Gate Read/Clear to the tabs where they make sense (hide elsewhere).
