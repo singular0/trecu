@@ -110,7 +110,7 @@ class ConfirmScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Middle(id="dialog"):
             yield Label(self._question)
-            with Center(id="buttons"):
+            with Horizontal(id="buttons"):
                 yield Button("Yes, clear", variant="error", id="yes")
                 yield Button("Cancel", variant="primary", id="no")
 
