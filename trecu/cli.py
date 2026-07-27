@@ -132,8 +132,8 @@ def _autodetect_port() -> str:
         return candidates[0]["device"]
     if not candidates:
         raise SystemExit(
-            "No FTDI/KKL cable detected. Plug it in, or pass --port, or use "
-            "--mock. Run `trecu ports` to see what is available."
+            "No FTDI/KKL cable detected. Plug it in, or pass --port. "
+            "Run `trecu ports` to see what is available."
         )
     raise SystemExit(
         "Multiple FTDI devices found; specify one with --port. Candidates: "
