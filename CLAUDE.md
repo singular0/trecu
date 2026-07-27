@@ -203,12 +203,12 @@ into ordered `SensorReading`s (dropping any id the ECU didn't answer or the
 table can't decode); on the OBD path `None` means `DEFAULT_LIVE_PIDS`, on the
 KWP path `pids` are channel indices and `None` means every channel.
 
-**TUI layout (`tui/app.py`) is a one-row session "spine" over a
-`TabbedContent` body.** The spine shows the brand on the left and, right-aligned,
-a colored liveness dot + state label (`disconnected`/`connecting`/`reading`/
-`clearing`/`connected`/`error`, keyed off `_SPINE`, hex-colored; grey when
-disconnected, yellow while connecting, dim green connected, bright green during
-a read/clear, red on error). The **Faults tab itself is the fault
+**TUI layout (`tui/app.py`) uses Textual's one-row `Header` title bar over a
+`TabbedContent` body.** The title bar shows the app name and version together
+with a colored liveness dot + state label (`disconnected`/`connecting`/`reading`/
+`clearing`/`connected`/`error`, keyed off `_CONNECTION_STATES`, hex-colored;
+grey when disconnected, yellow while connecting, dim green connected, bright
+green during a read/clear, red on error). The **Faults tab itself is the fault
 indicator** — `_mark_faults_tab` toggles a `-has-faults` class (CSS `color:
 $error; text-style: bold`) on the tab so its label turns red whenever the last
 read found stored codes (there is no separate MIL lamp in the spine). The body

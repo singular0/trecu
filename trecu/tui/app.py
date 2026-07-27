@@ -1,6 +1,6 @@
 """Textual application: connect, read, decode, and clear Triumph fault codes.
 
-The UI is a persistent *session* (a status "spine") over a set of tabbed views:
+The UI is a persistent *session* with a title bar over a set of tabbed views:
 a **Dashboard** (faults + ECU identity cards), the **Fault Codes** table, and
 the raw protocol **Log**. See the "TUI: the tabbed session shell" section of
 ``ROADMAP.md`` for the concept and how live-data / throttle-sync tabs slot in
@@ -24,6 +24,7 @@ from textual.widgets import (
     Button,
     DataTable,
     Footer,
+    Header,
     Label,
     LoadingIndicator,
     RichLog,
@@ -71,8 +72,8 @@ TransportFactory = Callable[[], Transport]
 PortLister = Callable[[], list]
 TransportForPort = Callable[[str], Transport]
 
-# Session state -> (dot colour, glyph, label) for the spine.
-_SPINE = {
+# Session state -> (dot colour, glyph, label) for the title bar.
+_CONNECTION_STATES = {
     "disconnected": ("#9ca3af", "○", "disconnected"),
     "connecting": ("#eab308", "●", "connecting..."),
     "reading": ("#4ade80", "●", "reading..."),
@@ -256,7 +257,7 @@ class TrecuApp(App):
     """Read and decode Triumph ECU fault codes."""
 
     TITLE = "TrECU"
-    SUB_TITLE = "Triumph ECU fault-code reader"
+    SUB_TITLE = "disconnected"
 
     # No command palette: trecu's whole surface is the two-key footer, and the
     # Ctrl+P palette only adds Textual's stock actions (screenshot, theme, …)
@@ -264,14 +265,6 @@ class TrecuApp(App):
     ENABLE_COMMAND_PALETTE = False
 
     CSS = """
-    #spine {
-        height: 1;
-        padding: 0 1;
-        background: $panel;
-        color: $text;
-    }
-    #brand { width: auto; }
-    #conn { width: 1fr; content-align: right middle; }
     /* Fill the leftover height instead of auto-sizing: an auto TabbedContent
        lets the 1fr Fault Codes / Log widgets overflow the screen by a row,
        which shows a full-height screen scrollbar. */
@@ -373,7 +366,7 @@ class TrecuApp(App):
         self._cancelled_connect = False
         # Phase 3 live streaming: a paused poll timer (started on entering the
         # Live Data tab), a re-entrancy guard, per-PID running stats + history,
-        # and a manual freeze toggle. `_streaming` drives the spine label.
+        # and a manual freeze toggle. `_streaming` drives the title-bar label.
         self._live_timer = None
         self._live_busy = False
         self._live_frozen = False
@@ -381,14 +374,25 @@ class TrecuApp(App):
         self._live_stats: dict = {}
         self._live_columns: list = []
 
+    def format_title(self, title: str, sub_title: str) -> Text:
+        """Render the app identity and live connection state in the title bar."""
+        color, dot, label = _CONNECTION_STATES.get(
+            self._state, _CONNECTION_STATES["disconnected"]
+        )
+        if self._streaming and self._state == "connected":
+            color = "#3b82f6" if self._live_frozen else "#4ade80"
+            label = "frozen" if self._live_frozen else "streaming..."
+        return Text.assemble(
+            (title, "bold"),
+            (f" v{__version__}", "dim"),
+            (" — ", "dim"),
+            (dot, color),
+            (f" {label}", "bold"),
+        )
+
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
-        with Horizontal(id="spine"):
-            brand = Text.assemble(
-                ("TrECU", "bold"), (f" v{__version__}", "dim")
-            )
-            yield Static(brand, id="brand")
-            yield Static(id="conn")
+        yield Header(show_clock=False, icon="")
         with TabbedContent(initial="tab-dashboard"):
             with TabPane("Dashboard", id="tab-dashboard"):
                 with Horizontal(id="dashboard"):
@@ -458,20 +462,20 @@ class TrecuApp(App):
             self._set_state("disconnected")
             self.call_after_refresh(self._choose_port)
 
-    # -- spine (persistent session status) -----------------------------------
+    # -- title bar (persistent session status) -------------------------------
     def _set_state(self, state: str) -> None:
         self._state = state
-        self._refresh_spine()
+        self._refresh_titlebar()
 
-    def _refresh_spine(self) -> None:
-        color, dot, label = _SPINE.get(self._state, _SPINE["disconnected"])
-        # While the poll loop is running, the spine reports what the session is
-        # actually doing: streaming (bright green) or frozen (blue).
+    def _refresh_titlebar(self) -> None:
+        _, _, label = _CONNECTION_STATES.get(
+            self._state, _CONNECTION_STATES["disconnected"]
+        )
         if self._streaming and self._state == "connected":
-            color = "#3b82f6" if self._live_frozen else "#4ade80"
             label = "frozen" if self._live_frozen else "streaming..."
-        conn = f"[{color}]{dot}[/] [b]{label}[/]"
-        self.query_one("#conn", Static).update(Text.from_markup(conn))
+        # Header watches App.sub_title, so assigning the displayed state asks
+        # the native title bar to call format_title and redraw itself.
+        self.sub_title = label
 
     # -- helpers -------------------------------------------------------------
     def _append_log(self, msg: str) -> None:
@@ -615,7 +619,7 @@ class TrecuApp(App):
             self._live_timer.pause()
             if self._streaming:
                 self._streaming = False
-                self._refresh_spine()
+                self._refresh_titlebar()
 
     def _reset_live_table(self) -> None:
         """Clear the table + per-PID history for a fresh streaming session."""
@@ -626,7 +630,7 @@ class TrecuApp(App):
         """Pause/resume the live stream in place (keeps the last snapshot)."""
         self._live_frozen = not self._live_frozen
         self._append_log("live stream " + ("frozen" if self._live_frozen else "resumed"))
-        self._refresh_spine()
+        self._refresh_titlebar()
 
     def _poll_live(self) -> None:
         """Timer tick: kick a background live read unless one is in flight."""
@@ -670,7 +674,7 @@ class TrecuApp(App):
         if self._state != "connected":
             self._set_state("connected")
         else:
-            self._refresh_spine()
+            self._refresh_titlebar()
 
     def _update_live_table(self, readings: List[SensorReading]) -> None:
         # Update rows *in place* keyed by PID rather than clearing and rebuilding.
