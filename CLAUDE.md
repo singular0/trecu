@@ -221,7 +221,9 @@ error lines are red, and the app auto-switches here under `-v` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
-own arrow bindings are hidden). On each tab switch `_focus_active_tab` focuses
+own arrow bindings are hidden — but because they're priority they'd otherwise
+fire *through* a modal, so `_step_tab` no-ops while a modal owns the screen).
+On each tab switch `_focus_active_tab` focuses
 that tab's primary control (`_TAB_FOCUS` maps each tab to an ordered tuple of
 candidate selectors — Dashboard→`#card-faults`, Faults→`#dtcs`/`#empty`, Live
 Data→`#live`, Log→`#log` — and focuses the **first visible** one) so the row

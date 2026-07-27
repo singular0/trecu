@@ -506,6 +506,11 @@ class TrecuApp(App):
         self.query_one(TabbedContent).active = tab_id
 
     def _step_tab(self, delta: int) -> None:
+        # The ←/→ bindings are app-level priority=True, so they still fire while a
+        # modal (Confirm/Connecting/ConnectError) owns the screen — switching tabs
+        # behind the dialog. Ignore them until the modal is dismissed.
+        if self.screen is not self.screen_stack[0]:
+            return
         tabs = self.query_one(TabbedContent)
         order = [pane.id for pane in tabs.query(TabPane)]
         if not order:

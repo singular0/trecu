@@ -76,6 +76,44 @@ def test_right_reaches_faults_tab_after_clearing_codes():
     asyncio.run(scenario())
 
 
+def test_arrows_do_not_switch_tabs_while_modal_open():
+    # The ←/→ bindings are app-level priority=True, so they fire even when a modal
+    # owns the screen. Opening the Clear-confirm dialog and pressing arrows must
+    # not switch tabs behind it.
+    app = _app()
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            tabs = app.query_one(TabbedContent)
+            await _wait_for(pilot, lambda: app.query_one("#dtcs").row_count == 1)
+
+            await pilot.press("right")  # Dashboard -> Faults
+            await pilot.pause(0.1)
+            assert tabs.active == "tab-faults"
+
+            await pilot.press("c")  # open the Clear-confirm modal
+            await _wait_for(pilot, lambda: app.screen is not app.screen_stack[0])
+
+            # Arrows are inert while the modal is up.
+            await pilot.press("right")
+            await pilot.pause(0.1)
+            assert tabs.active == "tab-faults"
+            await pilot.press("left")
+            await pilot.pause(0.1)
+            assert tabs.active == "tab-faults"
+            # And the modal is still the active screen (arrows didn't dismiss it).
+            assert app.screen is not app.screen_stack[0]
+
+            # Dismiss it; arrows work again.
+            await pilot.press("escape")
+            await _wait_for(pilot, lambda: app.screen is app.screen_stack[0])
+            await pilot.press("left")  # Faults -> Dashboard
+            await pilot.pause(0.1)
+            assert tabs.active == "tab-dashboard"
+
+    asyncio.run(scenario())
+
+
 def test_right_cycles_through_all_tabs_with_empty_faults():
     # A full →→→→ sweep still visits every tab in order even while the Faults
     # tab shows its empty state (no codes on a fault-free mock).
