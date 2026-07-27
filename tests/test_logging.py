@@ -25,6 +25,8 @@ def test_verbose_cli_enables_protocol_debug_messages(capsys) -> None:
     assert "<- " not in normal.err
     assert "OBD request:" not in normal.err
     assert "ECU operation:" not in normal.err
+    assert "Connected via iso9141." in normal.out
+    assert "ECU key bytes" not in normal.out
 
     assert main([*args, "-v"]) == 0
     verbose = capsys.readouterr()
