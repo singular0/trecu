@@ -353,7 +353,8 @@ Dashboard — three summary cards, the landing view:
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Faults — the DTC table (or a centered "no faults" state when empty):
+Faults — the DTC table, always shown (just column headers and no rows when
+there are no codes; the "no faults" wording lives on the Dashboard's Faults card):
 
 ```
 ├─ Dashboard ─[ Faults ]─ Log ─────────────────────────────────────────┤

@@ -214,26 +214,25 @@ $error; text-style: bold`) on the tab so its label turns red whenever the last
 read found stored codes (there is no separate MIL lamp in the spine). The body
 has three
 tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
-identity), **Faults** (the DTC `DataTable` with a centered "no faults" empty
-state), **Live Data** (the Phase 3 streaming `DataTable` — sensor / value / unit
-/ running min / max / trend sparkline), and **Log** (the raw protocol `RichLog`;
-error lines are red, and the app auto-switches here under `-v` and on error).
+identity), **Faults** (the DTC `DataTable`, always visible — with no codes it
+just shows its column headers and no rows; the "no faults" wording lives on the
+Dashboard's Faults card, not a separate widget swap), **Live Data** (the Phase 3
+streaming `DataTable` — sensor / value / unit / running min / max / trend
+sparkline), and **Log** (the raw protocol `RichLog`; error lines are red, and the
+app auto-switches here under `-v` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
 own arrow bindings are hidden — but because they're priority they'd otherwise
 fire *through* a modal, so `_step_tab` no-ops while a modal owns the screen).
 On each tab switch `_focus_active_tab` focuses
-that tab's primary control (`_TAB_FOCUS` maps each tab to an ordered tuple of
-candidate selectors — Dashboard→`#card-faults`, Faults→`#dtcs`/`#empty`, Live
-Data→`#live`, Log→`#log` — and focuses the **first visible** one) so the row
-cursor / scroll lands where the user is looking; it no-ops only when a modal owns
-focus. Focus **must** land inside the newly active pane: the Faults tab lists its
-"no faults" empty state (made focusable in `on_mount`) as the fallback for the
-hidden DTC table precisely because leaving focus stranded in the *outgoing* pane
-lets `TabbedContent`'s focus-follows-pane handler (`_on_tab_pane_focused`, fired
-when Textual relocates focus within the pane it just hid) snap the active tab
-straight back — so e.g. `→` into the empty Faults tab used to silently revert. **The session is now mechanism, not just framing
+that tab's primary control (`_TAB_FOCUS` maps each tab to a single selector —
+Dashboard→`#card-faults`, Faults→`#dtcs`, Live Data→`#live`, Log→`#log`) so the
+row cursor / scroll lands where the user is looking; it no-ops only when a modal
+owns focus. Because every tab's focus target is always visible (the DTC table is
+never hidden), focus always lands inside the newly active pane — there's no
+hidden-widget strand for `TabbedContent`'s focus-follows-pane handler to snap
+back from. **The session is now mechanism, not just framing
 (roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
 lazily on the first read (`_ensure_session`), connected once and held open with
 a background keepalive ticker; re-reads and clears reuse it instead of
