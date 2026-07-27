@@ -341,7 +341,7 @@ def _cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _run(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "help":
         _build_parser().print_help()
@@ -362,6 +362,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "sensors":
         return _cmd_live(args)
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":  # pragma: no cover

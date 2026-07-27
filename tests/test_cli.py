@@ -120,6 +120,18 @@ def test_tui_command_launches_ui(monkeypatch) -> None:
     assert launched[0].protocol == "kwp-fast"
 
 
+def test_keyboard_interrupt_exits_cleanly(monkeypatch, capsys) -> None:
+    def interrupt(_args) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_cmd_tui", interrupt)
+
+    assert main(["tui"]) == 130
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "\nInterrupted.\n"
+
+
 def test_old_action_flags_are_rejected() -> None:
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["--read"])
