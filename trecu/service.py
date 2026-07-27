@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Iterator, List, Optional
 
+from .logging import Logger, LoggerLike, as_logger
 from .protocol.dtc import Dtc, DtcDatabase
 from .protocol.iso9141 import Iso9141Client, Iso9141Config
 from .protocol.pids import FormulaError, KwpLocalTable, PidDatabase, SensorReading
@@ -27,8 +28,6 @@ from .protocol.kwp2000 import (
     ProtocolError,
 )
 from .transport.base import Transport, TransportError
-
-Logger = Callable[[str], None]
 
 PROTOCOL_ISO9141 = "iso9141"
 PROTOCOL_KWP_SLOW = "kwp-slow"
@@ -79,7 +78,7 @@ class _Keepalive:
                 self._beat()
                 self.beats += 1
             except Exception as exc:  # noqa: BLE001 - keepalive is best-effort
-                self._log(f"keepalive failed: {exc}")
+                self._log.warning(f"keepalive failed: {exc}")
 
     def stop(self) -> None:
         self._stop.set()
@@ -108,12 +107,13 @@ class DiagnosticService:
         transport: Transport,
         config: Optional[object] = None,
         db: Optional[DtcDatabase] = None,
-        logger: Optional[Logger] = None,
+        logger: Optional[LoggerLike] = None,
         protocol: str = PROTOCOL_AUTO,
         client: Optional[object] = None,
         pids: Optional[PidDatabase] = None,
         kwp_local: Optional[KwpLocalTable] = None,
-        progress: Optional[Logger] = None,
+        progress: Optional[Callable[[str], None]] = None,
+        verbose: bool = False,
     ):
         self.transport = transport
         self.config = config
@@ -122,7 +122,7 @@ class DiagnosticService:
         # The KWP/Keihin packed-frame channel table (its own data file); used
         # only on the ``kwp_local`` live path, but loaded up front like ``pids``.
         self.kwp_local = kwp_local or KwpLocalTable.load_default()
-        self._logger = logger or (lambda _m: None)
+        self._logger = as_logger(logger, verbose=verbose)
         # Connect-progress hook: called with each protocol label *before* it's
         # probed, so a UI can show which one the auto-sweep is currently trying.
         self._progress = progress or (lambda _p: None)
@@ -180,13 +180,13 @@ class DiagnosticService:
                             try:
                                 stop_session()
                             except Exception as exc:  # best-effort shutdown
-                                self._logger(
+                                self._logger.warning(
                                     f"stop-diagnostic-session ignored: {exc}"
                                 )
                     try:
                         client.stop_communication()
                     except Exception as exc:  # best-effort shutdown
-                        self._logger(f"stop-communication ignored: {exc}")
+                        self._logger.warning(f"stop-communication ignored: {exc}")
             finally:
                 self._clear_active()
                 self.transport.close()
@@ -281,17 +281,18 @@ class DiagnosticService:
         for proto in self._candidate_protocols():
             client = self._build_client(proto)
             label = proto or client.__class__.__name__
+            self._logger.debug(f"probing ECU with protocol {label}")
             self._progress(label)
             try:
                 info = client.connect()
             except (ProtocolError, TransportError) as exc:
                 errors.append(f"{label}: {exc}")
-                self._logger(f"[{label}] connect failed: {exc}")
+                self._logger.debug(f"[{label}] connect failed: {exc}")
                 continue
             self._active = client
             self._active_info = info
             self._active_proto = proto or client.__class__.__name__
-            self._logger(f"connected via {self._active_proto}")
+            self._logger.debug(f"connected via {self._active_proto}")
             return client
         raise ProtocolError("could not connect: " + "; ".join(errors))
 
@@ -303,9 +304,11 @@ class DiagnosticService:
     def read_faults(self) -> ReadResult:
         with self._io_lock:
             client = self._connect()
+            self._logger.debug("ECU operation: reading identification and fault codes")
             ecu_info = self._read_identification(client)
             triples = client.read_dtcs()
             dtcs = self.db.decode_all(triples, family=client.dtc_family)
+            self._logger.debug(f"ECU operation complete: decoded {len(dtcs)} fault(s)")
             info = self._active_info
             return ReadResult(
                 key_bytes=info.key_bytes if info else b"",
@@ -323,21 +326,25 @@ class DiagnosticService:
     def _read_identification(self, client) -> Optional[EcuInfo]:
         """Best-effort identity read, cached so re-reads don't re-query the ECU."""
         if self._ecu_info is not None:
+            self._logger.debug("ECU identification: using session cache")
             return self._ecu_info
         fn = getattr(client, "read_identification", None)
         if fn is None:
             return None
         try:
+            self._logger.debug("ECU operation: reading identification")
             self._ecu_info = fn()
         except (ProtocolError, TransportError) as exc:
-            self._logger(f"identification skipped: {exc}")
+            self._logger.warning(f"identification skipped: {exc}")
             self._ecu_info = EcuInfo()
         return self._ecu_info
 
     def clear_faults(self) -> None:
         with self._io_lock:
             client = self._connect()
+            self._logger.debug("ECU operation: clearing fault codes")
             client.clear_dtcs()
+            self._logger.debug("ECU operation complete: fault codes cleared")
 
     def read_live(
         self, pids: Optional[Iterable[int]] = None
@@ -364,6 +371,7 @@ class DiagnosticService:
         requested = None if pids is None else list(pids)
         with self._io_lock:
             client = self._connect()
+            self._logger.debug("ECU operation: reading live data")
             read = getattr(client, "read_live", None)
             if read is None:
                 return []
@@ -378,7 +386,13 @@ class DiagnosticService:
                     requested = list(DEFAULT_LIVE_PIDS)
                 raw = read(requested)
         if kwp_table is not None:
-            return [] if frame is None else kwp_table.decode_frame(frame, requested)
+            readings = (
+                [] if frame is None else kwp_table.decode_frame(frame, requested)
+            )
+            self._logger.debug(
+                f"ECU live-data operation complete: {len(readings)} reading(s)"
+            )
+            return readings
         readings: List[SensorReading] = []
         for pid in requested:
             data = raw.get(pid)
@@ -387,7 +401,10 @@ class DiagnosticService:
             try:
                 readings.append(self.pids.decode(pid, data))
             except (KeyError, FormulaError) as exc:
-                self._logger(f"live decode skipped for 0x{pid:02X}: {exc}")
+                self._logger.warning(f"live decode skipped for 0x{pid:02X}: {exc}")
+        self._logger.debug(
+            f"ECU live-data operation complete: {len(readings)} reading(s)"
+        )
         return readings
 
     def __enter__(self) -> "DiagnosticService":

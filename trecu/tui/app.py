@@ -448,8 +448,6 @@ class TrecuApp(App):
         )
         self._refresh_connection_card()
         self._set_state("disconnected")
-        if self._verbose:
-            self.action_show_tab("tab-log")
         if self._transport_factory is not None:
             mode = "MOCK ECU (no hardware)" if self._mock else "serial K-line"
             self._append_log(f"TrECU ready — {mode} mode. Press 'r' to read.")
@@ -480,13 +478,19 @@ class TrecuApp(App):
     # -- helpers -------------------------------------------------------------
     def _append_log(self, msg: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        # Error lines use an "[error]" prefix (see _on_error); render them red.
-        style = "bold red" if msg.startswith("[error]") else ""
+        # Level prefixes come from the shared logger; operational messages
+        # written directly by the TUI remain unstyled.
+        if msg.startswith("[error]"):
+            style = "bold red"
+        elif msg.startswith("[warning]"):
+            style = "yellow"
+        else:
+            style = ""
         line = Text.assemble((f"{stamp}  ", "dim"), (msg, style))
         self.query_one("#log", RichLog).write(line)
 
-    def _logger(self, msg: str) -> None:
-        """Protocol logger — invoked from the worker thread."""
+    def _ecu_logger(self, msg: str) -> None:
+        """Visible ECU logger — invoked from the worker thread."""
         self.call_from_thread(self._append_log, msg)
 
     def action_show_tab(self, tab_id: str) -> None:
@@ -575,10 +579,11 @@ class TrecuApp(App):
                 self._transport_factory(),
                 self._config,
                 self._db,
-                self._logger,
+                self._ecu_logger,
                 protocol=self._protocol,
                 pids=self._pids,
                 progress=self._on_connect_probe,
+                verbose=self._verbose,
             )
             svc.start_session(self._keepalive_interval)
             self._session = svc
@@ -902,10 +907,11 @@ class TrecuApp(App):
             self._transport_factory(),
             self._config,
             self._db,
-            self._logger,
+            self._ecu_logger,
             protocol=self._protocol,
             pids=self._pids,
             progress=self._on_connect_probe,
+            verbose=self._verbose,
         )
         self._connecting_service = svc
         error: Optional[Exception] = None

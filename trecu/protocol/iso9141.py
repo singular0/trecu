@@ -16,13 +16,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
 from .kwp2000 import (
     STATUS_CONFIRMED,
     STATUS_PENDING,
     ConnectionInfo,
     EcuInfo,
-    Logger,
     ProtocolError,
     decode_identification_ascii,
     parse_obd_dtc_pairs,
@@ -36,6 +36,14 @@ MODE_CLEAR_DTC = 0x04
 MODE_PENDING_DTC = 0x07
 MODE_VEHICLE_INFO = 0x09
 POSITIVE_OFFSET = 0x40
+
+_MODE_NAMES = {
+    MODE_CURRENT_DATA: "current data",
+    MODE_STORED_DTC: "stored DTCs",
+    MODE_CLEAR_DTC: "clear DTCs",
+    MODE_PENDING_DTC: "pending DTCs",
+    MODE_VEHICLE_INFO: "vehicle information",
+}
 
 # Mode 09 (vehicle information) PIDs.
 VI_PID_VIN = 0x02
@@ -77,11 +85,11 @@ class Iso9141Client:
         self,
         transport: Transport,
         config: Optional[Iso9141Config] = None,
-        logger: Optional[Logger] = None,
+        logger: Optional[LoggerLike] = None,
     ):
         self.transport = transport
         self.config = config or Iso9141Config()
-        self._log = logger or (lambda _msg: None)
+        self._log = as_logger(logger, verbose=True)
 
     # -- helpers -------------------------------------------------------------
     @staticmethod
@@ -127,7 +135,7 @@ class Iso9141Client:
         last: Optional[Exception] = None
         for attempt in range(self.config.init_retries):
             if attempt > 0:
-                self._log(
+                self._log.debug(
                     f"slow-init retry {attempt} (settle {self.config.retry_wait}s)"
                 )
                 time.sleep(self.config.retry_wait)
@@ -136,7 +144,7 @@ class Iso9141Client:
                 return ConnectionInfo(key_bytes=key, session_started=True)
             except (ProtocolError, TransportError) as exc:
                 last = exc
-                self._log(f"slow-init attempt {attempt + 1} failed: {exc}")
+                self._log.debug(f"slow-init attempt {attempt + 1} failed: {exc}")
         raise ProtocolError(f"5-baud init failed: {last}")
 
     def stop_communication(self) -> None:
@@ -159,12 +167,18 @@ class Iso9141Client:
         """Send an OBD request; return the response payload (mode byte + data)."""
         cfg = self.config
         timeout = cfg.p2_timeout if timeout is None else timeout
+        mode = data[0]
+        detail = self._hex(data[1:]) or "none"
+        self._log.debug(
+            f"OBD request: Mode {mode:02X} ({_MODE_NAMES.get(mode, 'unknown')}), "
+            f"data={detail}, timeout={timeout:g}s"
+        )
         body = bytes(cfg.header) + data
         frame = body + bytes((sum(body) & 0xFF,))
         t = self.transport
         time.sleep(cfg.request_gap)
         t.reset_input()
-        self._log(f"-> {self._hex(frame)}")
+        self._log.debug(f"-> {self._hex(frame)}")
         try:
             t.write(frame)
             if t.echoes:
@@ -175,15 +189,23 @@ class Iso9141Client:
         raw = self._collect(timeout)
         if not raw:
             raise ProtocolError("no OBD response (timeout)")
-        self._log(f"<- {self._hex(raw)}")
+        self._log.debug(f"<- {self._hex(raw)}")
         # Trim any leading noise before the 0x48 response header.
         start = raw.find(0x48)
         frame_in = raw[start:] if start >= 0 else raw
         if len(frame_in) < 5:
             raise ProtocolError(f"short OBD response: {self._hex(raw)}")
         if (sum(frame_in[:-1]) & 0xFF) != frame_in[-1]:
-            self._log("!! OBD response checksum mismatch (continuing best-effort)")
-        return frame_in[3:-1]  # strip 3-byte header + checksum -> mode + data
+            self._log.warning(
+                "OBD response checksum mismatch (continuing best-effort)"
+            )
+        payload = frame_in[3:-1]  # strip header + checksum -> mode + data
+        response_mode = payload[0] if payload else 0
+        self._log.debug(
+            f"OBD response: Mode {response_mode:02X}, "
+            f"{max(0, len(payload) - 1)} data byte(s)"
+        )
+        return payload
 
     def _read_exact(self, count: int, timeout: float) -> bytes:
         deadline = time.monotonic() + timeout
@@ -315,7 +337,9 @@ class Iso9141Client:
             try:
                 result = self._request_dtcs(MODE_STORED_DTC, STATUS_CONFIRMED)
             except ProtocolError as exc:
-                self._log(f"Mode 03 attempt {attempt + 1}/{attempts} failed: {exc}")
+                self._log.debug(
+                    f"Mode 03 attempt {attempt + 1}/{attempts} failed: {exc}"
+                )
                 result = []
             if len(result) >= expected:  # expected==0 accepts an empty result
                 return result
@@ -325,8 +349,8 @@ class Iso9141Client:
                 f"none after {attempts} attempts"
             )
         if len(result) < expected:
-            self._log(
-                f"warning: status reports {expected} stored DTC(s), read {len(result)}"
+            self._log.warning(
+                f"status reports {expected} stored DTC(s), read {len(result)}"
             )
         return result
 
@@ -338,19 +362,33 @@ class Iso9141Client:
         PID 01 reply surfaces as a hard error (dead session) instead of a false
         "no codes". Pending (Mode 07) is best-effort — unsupported on some ECUs.
         """
-        _mil, count = self._read_status_strict()
+        mil, count = self._read_status_strict()
+        self._log.debug(
+            f"OBD ECU status: MIL={'on' if mil else 'off'}, "
+            f"{count} stored DTC(s) expected"
+        )
         stored = self._read_stored(count)
         try:
             pending = self._request_dtcs(
                 MODE_PENDING_DTC, STATUS_PENDING, timeout=self.config.pending_timeout
             )
-        except ProtocolError:
+        except ProtocolError as exc:
+            self._log.debug(f"OBD pending-DTC read unavailable: {exc}")
             pending = []
         seen = {(h, l) for h, l, _ in stored}
-        return stored + [(h, l, s) for (h, l, s) in pending if (h, l) not in seen]
+        result = stored + [
+            (h, l, s) for (h, l, s) in pending if (h, l) not in seen
+        ]
+        self._log.debug(
+            f"OBD DTC read complete: {len(stored)} stored, "
+            f"{len(result) - len(stored)} additional pending"
+        )
+        return result
 
     def clear_dtcs(self) -> None:
         """Clear stored DTCs and turn off the MIL (Mode 04)."""
+        self._log.debug("OBD clearing all stored DTCs")
         resp = self.obd_request(bytes((MODE_CLEAR_DTC,)))
         if not resp or resp[0] != MODE_CLEAR_DTC + POSITIVE_OFFSET:
             raise ProtocolError("clear (Mode 04) not acknowledged")
+        self._log.debug("OBD clear-DTC request acknowledged")

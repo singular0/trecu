@@ -27,10 +27,11 @@ def test_titlebar_shows_name_version_and_connection_status():
                 await pilot.pause(0.05)
 
             assert app._state == "connected"
-            title = app.query_one(Header).query_one("HeaderTitle").render()
-            assert title.plain == (
-                f"TrECU v{__version__} — ● connected"
-            )
+            expected = f"TrECU v{__version__} — ● connected"
+            title_widget = app.query_one(Header).query_one("HeaderTitle")
+            while title_widget.render().plain != expected and time.monotonic() < deadline:
+                await pilot.pause(0.05)
+            assert title_widget.render().plain == expected
             assert not app.query("#spine")
 
     asyncio.run(scenario())

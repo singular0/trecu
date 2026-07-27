@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
+from ..logging import Logger, LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
 from .framing import (
     ADDR_PHYSICAL,
@@ -57,6 +58,20 @@ POSITIVE_RESPONSE_OFFSET = 0x40
 NEGATIVE_RESPONSE = 0x7F
 NRC_RESPONSE_PENDING = 0x78
 
+_SID_NAMES = {
+    SID_START_COMMUNICATION: "StartCommunication",
+    SID_STOP_COMMUNICATION: "StopCommunication",
+    SID_START_DIAGNOSTIC_SESSION: "StartDiagnosticSession",
+    SID_STOP_DIAGNOSTIC_SESSION: "StopDiagnosticSession",
+    SID_ACCESS_TIMING_PARAMETER: "AccessTimingParameter",
+    SID_TESTER_PRESENT: "TesterPresent",
+    SID_CLEAR_DIAGNOSTIC_INFO: "ClearDiagnosticInformation",
+    SID_READ_DTC_BY_STATUS: "ReadDTCByStatus",
+    SID_READ_ECU_IDENTIFICATION: "ReadEcuIdentification",
+    SID_READ_DATA_BY_LOCAL_ID: "ReadDataByLocalIdentifier",
+    SID_OBD_MODE_STORED_DTC: "OBD Mode 03 (stored DTCs)",
+}
+
 # A subset of ISO 14230 negative-response codes for friendlier messages.
 _NRC_NAMES = {
     0x10: "generalReject",
@@ -70,9 +85,6 @@ _NRC_NAMES = {
     0x7E: "subFunctionNotSupportedInActiveSession",
     0x7F: "serviceNotSupportedInActiveSession",
 }
-
-Logger = Callable[[str], None]
-
 
 def decode_identification_ascii(data: bytes) -> str:
     """Best-effort ASCII text from an identification payload.
@@ -125,7 +137,7 @@ def slow_init_handshake(
     w4: float = 0.030,
     sync_timeout: float = 0.6,
     byte_timeout: float = 0.4,
-    log: Logger = lambda _m: None,
+    log: Optional[LoggerLike] = None,
 ) -> bytes:
     """Run the ISO 9141-2 / ISO 14230 5-baud slow-init handshake at ``address``.
 
@@ -143,8 +155,9 @@ def slow_init_handshake(
         b = transport.read(1, timeout)
         return b[0] if b else None
 
+    logger = as_logger(log, verbose=True)
     transport.reset_input()
-    log(f"5-baud init @ 0x{address:02X} ...")
+    logger.debug(f"5-baud init @ 0x{address:02X} ...")
     transport.five_baud_init(address)
 
     # Read until the 0x55 sync appears, skipping break-pulse noise.
@@ -184,7 +197,9 @@ def slow_init_handshake(
             f"slow-init handshake mismatch: inv-addr {inv_addr:02X}, "
             f"expected {expected:02X}"
         )
-    log(f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, inv-addr {inv_addr:02X}")
+    logger.debug(
+        f"slow-init ok: key bytes {kb1:02X} {kb2:02X}, inv-addr {inv_addr:02X}"
+    )
     return bytes((kb1, kb2))
 
 
@@ -288,11 +303,13 @@ class Kwp2000Client:
         self,
         transport: Transport,
         config: Optional[Kwp2000Config] = None,
-        logger: Optional[Logger] = None,
+        logger: Optional[LoggerLike] = None,
     ):
         self.transport = transport
         self.config = config or Kwp2000Config()
-        self._log = logger or (lambda _msg: None)
+        # Supplying a callback directly has historically requested protocol
+        # traces. The service passes a configured Logger to apply CLI verbosity.
+        self._log = as_logger(logger, verbose=True)
 
     # -- logging helper ------------------------------------------------------
     def _hex(self, data: bytes) -> str:
@@ -325,7 +342,7 @@ class Kwp2000Client:
                     continue
             if expected is not None and len(buf) >= expected:
                 frame, _ = parse_frame(bytes(buf))
-                self._log(f"<- {self._hex(frame.raw)}")
+                self._log.debug(f"<- {self._hex(frame.raw)}")
                 return frame
 
     def _discard_echo(self, frame: bytes) -> None:
@@ -333,8 +350,8 @@ class Kwp2000Client:
             return
         echo = self.transport.read(len(frame), self.config.p2_timeout)
         if echo != frame:
-            self._log(
-                f"!! echo mismatch (sent {self._hex(frame)}, "
+            self._log.warning(
+                f"echo mismatch (sent {self._hex(frame)}, "
                 f"got {self._hex(echo)})"
             )
 
@@ -347,16 +364,22 @@ class Kwp2000Client:
         """
         cfg = self.config
         timeout = cfg.p2_timeout if timeout is None else timeout
+        request_sid = payload[0]
+        service = _SID_NAMES.get(request_sid, "unknown service")
+        params = self._hex(payload[1:]) or "none"
+        self._log.debug(
+            f"KWP request: {service} (0x{request_sid:02X}), params={params}, "
+            f"timeout={timeout:g}s"
+        )
         frame = build_frame(payload, cfg.ecu_address, cfg.tester_address, cfg.addr_mode)
         self.transport.reset_input()
-        self._log(f"-> {self._hex(frame)}")
+        self._log.debug(f"-> {self._hex(frame)}")
         try:
             self.transport.write(frame)
             self._discard_echo(frame)
         except TransportError as exc:
             raise ProtocolError(str(exc)) from exc
 
-        request_sid = payload[0]
         pending = 0
         while True:
             try:
@@ -371,28 +394,35 @@ class Kwp2000Client:
                 nrc = resp[2] if len(resp) >= 3 else 0
                 if nrc == NRC_RESPONSE_PENDING and pending < cfg.max_pending:
                     pending += 1
-                    self._log(f".. ECU busy (responsePending {pending})")
+                    self._log.debug(f".. ECU busy (responsePending {pending})")
                     timeout = cfg.pending_timeout
                     continue
+                self._log.debug(
+                    f"KWP negative response: {service} (0x{request_sid:02X}), "
+                    f"NRC=0x{nrc:02X} ({_NRC_NAMES.get(nrc, 'unknown')})"
+                )
                 raise NegativeResponse(resp[1] if len(resp) >= 2 else request_sid, nrc)
             if resp[0] != request_sid + POSITIVE_RESPONSE_OFFSET:
                 raise ProtocolError(
                     f"unexpected response service 0x{resp[0]:02X} "
                     f"for request 0x{request_sid:02X}"
                 )
+            self._log.debug(
+                f"KWP response: {service} acknowledged, {len(resp) - 1} data byte(s)"
+            )
             return resp
 
     # -- high level services -------------------------------------------------
     def start_communication(self) -> bytes:
         """Fast-init the K-line and start a KWP2000 session; return key bytes."""
-        self._log("fast-init ...")
+        self._log.debug("fast-init ...")
         try:
             self.transport.fast_init(self.config.init_low_ms, self.config.init_high_ms)
         except TransportError as exc:
             raise ProtocolError(f"fast-init failed: {exc}") from exc
         resp = self.request(bytes((SID_START_COMMUNICATION,)))
         key_bytes = resp[1:]
-        self._log(f"connected, key bytes: {self._hex(key_bytes)}")
+        self._log.debug(f"connected, key bytes: {self._hex(key_bytes)}")
         return key_bytes
 
     def start_diagnostic_session(self, session: Optional[int] = None) -> bytes:
@@ -412,13 +442,13 @@ class Kwp2000Client:
         try:
             self.request(bytes((SID_STOP_DIAGNOSTIC_SESSION,)))
         except ProtocolError as exc:
-            self._log(f"stop-diagnostic-session ignored: {exc}")
+            self._log.warning(f"stop-diagnostic-session ignored: {exc}")
 
     def stop_communication(self) -> None:
         try:
             self.request(bytes((SID_STOP_COMMUNICATION,)))
         except ProtocolError as exc:
-            self._log(f"stop-communication ignored: {exc}")
+            self._log.warning(f"stop-communication ignored: {exc}")
 
     def tester_present(self, response_required: bool = False) -> None:
         sub = 0x01 if response_required else 0x02  # 0x02 = no positive response
@@ -429,6 +459,11 @@ class Kwp2000Client:
             self.config.addr_mode,
         )
         self.transport.reset_input()
+        self._log.debug(
+            "KWP keepalive: TesterPresent "
+            + ("with response" if response_required else "response suppressed")
+        )
+        self._log.debug(f"-> {self._hex(frame)}")
         self.transport.write(frame)
         self._discard_echo(frame)
         if response_required:
@@ -458,7 +493,9 @@ class Kwp2000Client:
         last: Optional[Exception] = None
         for attempt in range(max(1, cfg.init_retries)):
             if attempt > 0:
-                self._log(f"slow-init retry {attempt} (settle {cfg.retry_wait}s)")
+                self._log.debug(
+                    f"slow-init retry {attempt} (settle {cfg.retry_wait}s)"
+                )
                 time.sleep(cfg.retry_wait)
             try:
                 key = slow_init_handshake(
@@ -469,11 +506,13 @@ class Kwp2000Client:
                     byte_timeout=cfg.byte_timeout,
                     log=self._log,
                 )
-                self._log(f"connected (5-baud), key bytes: {self._hex(key)}")
+                self._log.debug(
+                    f"connected (5-baud), key bytes: {self._hex(key)}"
+                )
                 return key
             except (ProtocolError, TransportError) as exc:
                 last = exc
-                self._log(f"slow-init attempt {attempt + 1} failed: {exc}")
+                self._log.debug(f"slow-init attempt {attempt + 1} failed: {exc}")
         raise ProtocolError(f"5-baud init failed: {last}")
 
     def _access_timing_parameter(self) -> None:
@@ -491,7 +530,7 @@ class Kwp2000Client:
                 bytes((SID_ACCESS_TIMING_PARAMETER, 0x03)) + bytes(params)
             )
         except ProtocolError as exc:
-            self._log(f"timing parameters not accepted: {exc}")
+            self._log.warning(f"timing parameters not accepted: {exc}")
 
     def connect(self) -> ConnectionInfo:
         """Full connect sequence, per ``config.init_mode``.
@@ -511,9 +550,12 @@ class Kwp2000Client:
             try:
                 self.start_diagnostic_session()
                 started = True
+                self._log.debug(
+                    f"KWP diagnostic session 0x{self.config.diagnostic_session:02X} started"
+                )
             except NegativeResponse as exc:
                 # Not fatal — some ECUs read DTCs in the default session.
-                self._log(f"diagnostic session not started: {exc}")
+                self._log.warning(f"diagnostic session not started: {exc}")
         self._access_timing_parameter()
         return ConnectionInfo(key_bytes=key_bytes, session_started=started)
 
@@ -544,7 +586,9 @@ class Kwp2000Client:
         cfg = self.config
         if cfg.read_dtc_service == SID_OBD_MODE_STORED_DTC:
             resp = self.request(bytes((SID_OBD_MODE_STORED_DTC,)))
-            return parse_obd_dtc_pairs(resp[1:], STATUS_CONFIRMED)
+            triples = parse_obd_dtc_pairs(resp[1:], STATUS_CONFIRMED)
+            self._log.debug(f"KWP ECU reported {len(triples)} stored DTC(s)")
+            return triples
         payload = bytes(
             (
                 SID_READ_DTC_BY_STATUS,
@@ -563,9 +607,10 @@ class Kwp2000Client:
         for i in range(0, len(body) - 2, 3):
             triples.append((body[i], body[i + 1], body[i + 2]))
         if count and len(triples) != count:
-            self._log(
-                f"note: ECU reported {count} DTCs, parsed {len(triples)} triples"
+            self._log.warning(
+                f"ECU reported {count} DTCs, parsed {len(triples)} triples"
             )
+        self._log.debug(f"KWP ECU reported {len(triples)} DTC record(s)")
         return triples
 
     # Live data on this path is the packed Keihin frame: the service requests
@@ -585,13 +630,21 @@ class Kwp2000Client:
         """
         out: Dict[int, bytes] = {}
         for pid in pids:
+            self._log.debug(f"KWP live-data read: local identifier 0x{pid:02X}")
             try:
                 resp = self.request(bytes((SID_READ_DATA_BY_LOCAL_ID, pid)))
-            except ProtocolError:
+            except ProtocolError as exc:
+                self._log.debug(
+                    f"KWP live-data identifier 0x{pid:02X} unavailable: {exc}"
+                )
                 continue
             # response: 61 <lid> <data...>
             if len(resp) >= 3 and resp[1] == pid:
                 out[pid] = bytes(resp[2:])
+                self._log.debug(
+                    f"KWP live-data identifier 0x{pid:02X}: "
+                    f"{len(resp) - 2} byte(s)"
+                )
         return out
 
     def read_identification(self) -> EcuInfo:
@@ -616,13 +669,18 @@ class Kwp2000Client:
         try:
             resp = self.request(bytes((SID_READ_ECU_IDENTIFICATION, rli)))
         except ProtocolError as exc:
-            self._log(f"ReadEcuIdentification 0x{rli:02X} skipped: {exc}")
+            self._log.warning(
+                f"ReadEcuIdentification 0x{rli:02X} skipped: {exc}"
+            )
             return ""
         # Response: 5A <rli> <data...>
         if len(resp) < 3 or resp[1] != rli:
             return ""
         data = resp[2:]
         raw[rli] = bytes(data)
+        self._log.debug(
+            f"KWP identification record 0x{rli:02X}: {len(data)} byte(s)"
+        )
         return decode_identification_ascii(data)
 
     def clear_dtcs(self) -> None:
@@ -635,4 +693,6 @@ class Kwp2000Client:
                 cfg.clear_dtc_group & 0xFF,
             )
         )
+        self._log.debug("KWP clearing all stored DTCs")
         self.request(payload)
+        self._log.debug("KWP clear-DTC request acknowledged")

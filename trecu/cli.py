@@ -52,7 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
     action.add_argument("--live", action="store_true", help="read one live-data (sensor) snapshot, print it, and exit (no TUI)")
     action.add_argument("-c", "--clear", action="store_true", help="clear stored codes and exit")
     action.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation on --clear")
-    action.add_argument("-v", "--verbose", action="store_true", help="print the raw KWP2000 byte traffic")
+    action.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="show debug logging, including raw protocol byte traffic",
+    )
     return p
 
 
@@ -167,10 +172,11 @@ def _print_dtcs(result) -> None:
 
 
 def _cmd_read(args: argparse.Namespace) -> int:
-    logger = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+    logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger, protocol=args.protocol
+        transport, _make_config(args), _load_db(args), logger,
+        protocol=args.protocol, verbose=args.verbose
     )
     try:
         with service:
@@ -201,10 +207,11 @@ def _print_live(readings) -> None:
 
 
 def _cmd_live(args: argparse.Namespace) -> int:
-    logger = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+    logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger, protocol=args.protocol
+        transport, _make_config(args), _load_db(args), logger,
+        protocol=args.protocol, verbose=args.verbose
     )
     try:
         with service:
@@ -222,10 +229,11 @@ def _cmd_clear(args: argparse.Namespace) -> int:
         if reply not in ("y", "yes"):
             print("Aborted.")
             return 1
-    logger = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+    logger = lambda m: print(m, file=sys.stderr)
     transport = _make_transport(args)
     service = DiagnosticService(
-        transport, _make_config(args), _load_db(args), logger, protocol=args.protocol
+        transport, _make_config(args), _load_db(args), logger,
+        protocol=args.protocol, verbose=args.verbose
     )
     try:
         with service:

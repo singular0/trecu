@@ -14,7 +14,7 @@ from trecu.tui.app import TrecuApp
 from trecu.transport.mock_obd import MockObdTransport
 
 
-def _app(**kw) -> TrecuApp:
+def _app(*, verbose=False, **kw) -> TrecuApp:
     # Default MockObdTransport stores one P1108, so the first read finds a fault
     # and clearing it drops the table to zero rows.
     return TrecuApp(
@@ -23,6 +23,7 @@ def _app(**kw) -> TrecuApp:
         port="mock",
         keepalive_interval=0,
         protocol="iso9141",
+        verbose=verbose,
     )
 
 
@@ -126,5 +127,27 @@ def test_right_cycles_through_all_tabs_with_empty_faults():
                 await pilot.press("right")
                 await pilot.pause(0.1)
                 assert tabs.active == expected
+
+    asyncio.run(scenario())
+
+
+def test_verbose_stays_on_dashboard_until_an_error():
+    app = _app(verbose=True)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            tabs = app.query_one(TabbedContent)
+            await _wait_for(pilot, lambda: app._state == "connected")
+            assert tabs.active == "tab-dashboard"
+
+            app._on_error(RuntimeError("test failure"))
+            # Let Textual dispatch the resulting TabActivated event before the
+            # run_test context tears down its screen stack.
+            await pilot.pause(0.5)
+            assert tabs.active == "tab-log"
+            lines = app.query_one("#log").lines
+            text = "\n".join(line.text for line in lines)
+            assert "OBD request: Mode 09 (vehicle information)" in text
+            assert "ECU operation complete: decoded" in text
 
     asyncio.run(scenario())
