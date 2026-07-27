@@ -32,7 +32,9 @@ class SpyClient:
         self.connects = 0
         self.reads = 0
         self.keepalives = 0
+        self.session_stops = 0
         self.stops = 0
+        self.shutdown_order = []
 
     def connect(self) -> ConnectionInfo:
         self.connects += 1
@@ -51,8 +53,13 @@ class SpyClient:
     def keepalive(self) -> None:
         self.keepalives += 1
 
+    def stop_diagnostic_session(self) -> None:
+        self.session_stops += 1
+        self.shutdown_order.append("session")
+
     def stop_communication(self) -> None:
         self.stops += 1
+        self.shutdown_order.append("communication")
 
 
 def _spy_service(spy: SpyClient) -> DiagnosticService:
@@ -69,9 +76,72 @@ def test_session_connects_once_and_reuses_across_operations():
         svc.clear_faults()
     assert spy.connects == 1          # connected once; the connection persists
     assert spy.reads == 2
+    assert spy.session_stops == 1     # leave the explicitly started diag session
     assert spy.stops == 1             # stop_communication on close
+    assert spy.shutdown_order == ["session", "communication"]
     assert [d.code for d in r1.dtcs] == ["P0107"]
     assert r2.count == 1
+
+
+def test_service_can_reconnect_after_close():
+    spy = SpyClient()
+    svc = _spy_service(spy)
+
+    with svc.session(keepalive_interval=0):
+        assert svc.read_faults().count == 1
+    assert svc._active is None
+    assert svc._active_info is None
+
+    with svc.session(keepalive_interval=0):
+        assert svc.read_faults().count == 1
+
+    assert spy.connects == 2
+    assert spy.session_stops == 2
+    assert spy.stops == 2
+
+
+def test_kwp_close_returns_to_default_session_then_disconnects():
+    transport = MockKLineTransport()
+    svc = DiagnosticService(transport, protocol="kwp-fast")
+    svc.start_session(keepalive_interval=0)
+    assert transport.diagnostic_session == 0x02
+    assert transport._connected is True
+
+    svc.close()
+
+    assert transport.diagnostic_session == 0x81
+    assert transport._connected is False
+    assert transport._open is False
+
+
+def test_close_waits_for_in_flight_io_before_shutdown():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingSpy(SpyClient):
+        def read_dtcs(self):
+            entered.set()
+            assert release.wait(timeout=2)
+            return super().read_dtcs()
+
+    spy = BlockingSpy()
+    svc = _spy_service(spy)
+    svc.start_session(keepalive_interval=0)
+    reader = threading.Thread(target=svc.read_faults)
+    closer = threading.Thread(target=svc.close)
+    reader.start()
+    assert entered.wait(timeout=1)
+    closer.start()
+    time.sleep(0.05)
+    assert closer.is_alive()
+    assert spy.shutdown_order == []
+
+    release.set()
+    reader.join(timeout=2)
+    closer.join(timeout=2)
+    assert not reader.is_alive()
+    assert not closer.is_alive()
+    assert spy.shutdown_order == ["session", "communication"]
 
 
 def test_start_session_connect_failure_closes_transport():

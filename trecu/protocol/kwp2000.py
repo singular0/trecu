@@ -36,6 +36,7 @@ from .framing import (
 SID_START_COMMUNICATION = 0x81
 SID_STOP_COMMUNICATION = 0x82
 SID_START_DIAGNOSTIC_SESSION = 0x10
+SID_STOP_DIAGNOSTIC_SESSION = 0x20
 SID_ACCESS_TIMING_PARAMETER = 0x83
 SID_TESTER_PRESENT = 0x3E
 SID_CLEAR_DIAGNOSTIC_INFO = 0x14
@@ -399,6 +400,19 @@ class Kwp2000Client:
         if session is None:
             return b""
         return self.request(bytes((SID_START_DIAGNOSTIC_SESSION, session)))
+
+    def stop_diagnostic_session(self) -> None:
+        """Return the ECU to its default session before ending communication.
+
+        ISO 14230-3 calls for this service when StartDiagnosticSession was
+        previously accepted. Some manufacturer-specific ECUs omit it, so
+        shutdown remains best-effort and continues with StopCommunication when
+        it is rejected or times out.
+        """
+        try:
+            self.request(bytes((SID_STOP_DIAGNOSTIC_SESSION,)))
+        except ProtocolError as exc:
+            self._log(f"stop-diagnostic-session ignored: {exc}")
 
     def stop_communication(self) -> None:
         try:

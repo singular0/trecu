@@ -141,15 +141,55 @@ class DiagnosticService:
     def open(self) -> None:
         self.transport.open()
 
-    def close(self) -> None:
+    def _clear_active(self) -> None:
+        """Forget all state that belongs to the current transport session."""
+        self._active = None
+        self._active_info = None
+        self._active_proto = ""
+        self._ecu_info = None
+
+    def close(self, *, force: bool = False) -> None:
+        """End the ECU session and release the transport.
+
+        Ordinary close is serialized with reads, clears, and keepalives. For a
+        KWP client whose StartDiagnosticSession request succeeded, it first
+        returns the ECU to its default session, then sends StopCommunication.
+        Both wire-level stops are best-effort so an unsupported service cannot
+        prevent the serial port being released.
+
+        ``force=True`` is reserved for cancelling a blocked connection attempt:
+        it closes the transport without waiting for the I/O lock, allowing the
+        blocked read to unwind.
+        """
         self._stop_keepalive()
-        try:
-            if self._active is not None:
-                self._active.stop_communication()
-        except Exception:
-            pass
-        finally:
+        if force:
+            self._clear_active()
             self.transport.close()
+            return
+
+        with self._io_lock:
+            client = self._active
+            info = self._active_info
+            try:
+                if client is not None:
+                    if info is not None and info.session_started:
+                        stop_session = getattr(
+                            client, "stop_diagnostic_session", None
+                        )
+                        if stop_session is not None:
+                            try:
+                                stop_session()
+                            except Exception as exc:  # best-effort shutdown
+                                self._logger(
+                                    f"stop-diagnostic-session ignored: {exc}"
+                                )
+                    try:
+                        client.stop_communication()
+                    except Exception as exc:  # best-effort shutdown
+                        self._logger(f"stop-communication ignored: {exc}")
+            finally:
+                self._clear_active()
+                self.transport.close()
 
     # -- persistent session (F1) --------------------------------------------
     def start_session(
@@ -166,7 +206,8 @@ class DiagnosticService:
         """
         self.open()
         try:
-            self._connect()
+            with self._io_lock:
+                self._connect()
         except Exception:
             self.close()
             raise

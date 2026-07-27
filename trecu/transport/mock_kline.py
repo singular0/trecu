@@ -70,6 +70,7 @@ class MockKLineTransport(Transport):
             0x8C: software.encode("ascii", "ignore"),
         }
         self.timing_params: bytes | None = None  # last AccessTimingParameter set
+        self.diagnostic_session = 0x81  # KWP default/standard session
         self._rx = bytearray()      # bytes waiting for the client to read
         self._open = False
         self._connected = False
@@ -145,7 +146,12 @@ class MockKLineTransport(Transport):
 
         if sid == 0x10:  # StartDiagnosticSession
             session = payload[1] if len(payload) > 1 else 0x81
+            self.diagnostic_session = session
             return bytes((0x50, session))
+
+        if sid == 0x20:  # StopDiagnosticSession
+            self.diagnostic_session = 0x81
+            return bytes((0x60,))
 
         if sid == 0x83:  # AccessTimingParameter ("set values" and friends)
             self.timing_params = bytes(payload[2:])  # remembered for assertions

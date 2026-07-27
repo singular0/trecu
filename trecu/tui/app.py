@@ -812,7 +812,7 @@ class TrecuApp(App):
         svc, self._connecting_service = self._connecting_service, None
         if svc is not None:
             try:
-                svc.close()
+                svc.close(force=True)
             except Exception:
                 pass
         self._close_session()
@@ -867,7 +867,9 @@ class TrecuApp(App):
         svc = self._connecting_service
         if svc is not None:
             try:
-                svc.close()  # unblock the connect thread's read; release the port
+                # Forced close deliberately bypasses the I/O lock so the
+                # transport closure can unblock the connect thread's read.
+                svc.close(force=True)
             except Exception:
                 pass
         if self._list_ports is not None:
