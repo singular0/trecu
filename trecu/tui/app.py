@@ -280,6 +280,9 @@ class TrecuApp(App):
         padding: 1 2;
         margin: 0 1;
     }
+    /* The focusable lead card (Dashboard's landing spot) shows the accent
+       border when it holds focus, mirroring the datatable cursor cue. */
+    .card:focus { border: round $accent; }
     /* Faults tab turns red when the last read found stored codes (replaces
        the old spine MIL lamp). Keep the active-tab underline visible. */
     Tab.-has-faults { color: $error; text-style: bold; }
@@ -310,9 +313,11 @@ class TrecuApp(App):
     ]
 
     # On tab switch, focus the tab's primary control so keyboard input (row
-    # cursor, scroll) lands where the user is looking. Dashboard has no such
-    # control and is omitted (focus is left alone there).
+    # cursor, scroll) lands where the user is looking. Dashboard has no natural
+    # cursor widget, so its lead summary card is made focusable (see on_mount)
+    # to give the tab a landing spot like the others.
     _TAB_FOCUS = {
+        "tab-dashboard": "#card-faults",
         "tab-faults": "#dtcs",
         "tab-live": "#live",
         "tab-log": "#log",
@@ -408,6 +413,10 @@ class TrecuApp(App):
         self._live_timer = self.set_interval(
             self._poll_interval, self._poll_live, pause=True
         )
+        # Static isn't focusable by default; opt every card in so Tab can step
+        # across them. The lead card is the tab's focus landing spot (_TAB_FOCUS).
+        for card in self.query(".card").results(Static):
+            card.can_focus = True
         self.query_one("#card-faults", Static).border_title = "Faults"
         self.query_one("#card-connection", Static).border_title = "Connection"
         self.query_one("#card-identity", Static).border_title = "ECU identity"
