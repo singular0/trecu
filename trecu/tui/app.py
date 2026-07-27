@@ -309,6 +309,15 @@ class TrecuApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
+    # On tab switch, focus the tab's primary control so keyboard input (row
+    # cursor, scroll) lands where the user is looking. Dashboard has no such
+    # control and is omitted (focus is left alone there).
+    _TAB_FOCUS = {
+        "tab-faults": "#dtcs",
+        "tab-live": "#live",
+        "tab-log": "#log",
+    }
+
     def __init__(
         self,
         transport_factory: Optional[TransportFactory] = None,
@@ -480,6 +489,30 @@ class TrecuApp(App):
         # pauses the poll loop (the half-duplex "active view is what the session
         # is doing" model — see the TUI section of ROADMAP.md).
         self._sync_live_polling()
+        self._focus_active_tab()
+
+    def _focus_active_tab(self) -> None:
+        """Focus the active tab's primary control (see ``_TAB_FOCUS``).
+
+        No-ops when a modal is on top (don't steal its focus) or when the target
+        is hidden — e.g. the Faults table gives way to the "no faults" empty
+        state, which isn't focusable, so focus is simply left where it is.
+        """
+        if self.screen is not self.screen_stack[0]:
+            return  # a modal owns focus right now
+        try:
+            active = self.query_one(TabbedContent).active
+        except Exception:
+            return
+        selector = self._TAB_FOCUS.get(active)
+        if selector is None:
+            return
+        try:
+            widget = self.query_one(selector)
+        except Exception:
+            return  # pane content not mounted yet
+        if widget.display:
+            widget.focus()
 
     def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
         """Gate Read/Clear to the tabs where they make sense (hide elsewhere).

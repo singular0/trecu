@@ -221,7 +221,12 @@ error lines are red, and the app auto-switches here under `-v` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
-own arrow bindings are hidden). **The session is now mechanism, not just framing
+own arrow bindings are hidden). On each tab switch `_focus_active_tab` focuses
+that tab's primary control (`_TAB_FOCUS`: Faults→`#dtcs`, Live Data→`#live`,
+Log→`#log`) so the row cursor / scroll lands where the user is looking; it
+no-ops on Dashboard (no such control), when a modal owns focus, or when the
+target is hidden (the Faults table gives way to the non-focusable "no faults"
+empty state). **The session is now mechanism, not just framing
 (roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
 lazily on the first read (`_ensure_session`), connected once and held open with
 a background keepalive ticker; re-reads and clears reuse it instead of
