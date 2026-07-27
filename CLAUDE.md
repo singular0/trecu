@@ -229,7 +229,14 @@ builds the `DiagnosticService` on the UI thread (not in the worker) and stashes
 it as `_connecting_service`. The doomed connect then finishes into a closed
 transport and `_connect_with_modal` discards it; crucially the service is
 published as `_session` **only on full success**, so a re-picked (even different)
-port always gets a clean, non-overlapping session.
+port always gets a clean, non-overlapping session. A connect that *fails* (all
+protocol candidates refused) surfaces a `ConnectErrorScreen` modal — the error
+text + an OK button — via `_on_connect_error`; dismissing it (`_on_connect_error_ack`)
+**hands back to the port picker** (or the ready state without a lister), the same
+fallback Cancel uses, so the user can pick a different port and retry. This is
+distinct from `_on_error` (a read/clear/live failure over an *already-established*
+session), which just tears the session down and shows the Log — a connect failure
+blocks the whole session, so it gets a modal that routes back to port selection.
 
 **TUI threading:** Textual is async but the protocol stack is blocking. The app
 runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the

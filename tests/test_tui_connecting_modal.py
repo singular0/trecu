@@ -9,8 +9,10 @@ back to the port picker when a port lister is configured.
 import asyncio
 import threading
 
-from trecu.tui.app import ConnectingScreen, TrecuApp
+from trecu.protocol.iso9141 import Iso9141Config
+from trecu.tui.app import ConnectErrorScreen, ConnectingScreen, TrecuApp
 from trecu.tui.port_select import PortSelectScreen
+from trecu.transport.base import TransportError
 from trecu.transport.mock_obd import MockObdTransport
 
 TWO_PORTS = [
@@ -47,6 +49,18 @@ def _app(gate: threading.Event) -> TrecuApp:
         keepalive_interval=0,
         protocol="iso9141",
     )
+
+
+class FailingObdTransport(MockObdTransport):
+    """A mock OBD ECU whose 5-baud init always fails — so ``client.connect()``
+    (and therefore the fresh session's ``start_session``) raises."""
+
+    def five_baud_init(self, address: int) -> None:
+        raise TransportError("simulated 5-baud init failure")
+
+
+# One-shot init so the failing connect gives up immediately (no retry sleeps).
+_FAIL_FAST = Iso9141Config(init_retries=1, retry_wait=0.0)
 
 
 def test_connecting_modal_shown_then_dismissed_on_success():
@@ -117,6 +131,61 @@ def test_cancel_returns_to_port_selection_when_lister_configured():
             gate.set()
             await pilot.pause(0.4)
             assert isinstance(app.screen, PortSelectScreen)
+            assert app._session is None
+
+    asyncio.run(scenario())
+
+
+def test_connect_error_shows_modal_then_returns_to_port_picker():
+    # A failing fresh connect surfaces a ConnectErrorScreen; OK hands back to
+    # the port picker so the user can pick a (different) port and retry.
+    app = TrecuApp(
+        transport_factory=None,
+        mock=False,
+        config=_FAIL_FAST,
+        list_ports=lambda: list(TWO_PORTS),
+        transport_for_port=lambda d: FailingObdTransport(),
+        keepalive_interval=0,
+        protocol="iso9141",
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PortSelectScreen)
+            await pilot.press("enter")           # pick a port -> connect fails
+            await pilot.pause(0.4)
+            assert isinstance(app.screen, ConnectErrorScreen)
+            assert app._state == "error"
+            assert app._session is None
+            await pilot.press("enter")           # OK -> back to the picker
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PortSelectScreen)
+            assert app._session is None
+
+    asyncio.run(scenario())
+
+
+def test_connect_error_modal_returns_to_ready_without_lister():
+    # With no port lister (a fixed --mock/--port), the error modal's OK has
+    # nowhere to route, so it drops back to the ready state instead.
+    app = TrecuApp(
+        transport_factory=lambda: FailingObdTransport(),
+        mock=True,
+        port="mock",
+        config=_FAIL_FAST,
+        keepalive_interval=0,
+        protocol="iso9141",
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.4)  # auto-read on mount -> connect fails
+            assert isinstance(app.screen, ConnectErrorScreen)
+            await pilot.press("enter")           # OK
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, ConnectErrorScreen)
+            assert app._state == "ready"
             assert app._session is None
 
     asyncio.run(scenario())

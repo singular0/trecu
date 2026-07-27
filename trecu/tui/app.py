@@ -198,6 +198,61 @@ class ConnectingScreen(ModalScreen):
         self._on_cancel()
 
 
+class ConnectErrorScreen(ModalScreen):
+    """Shown when a *fresh* connect fails: the error text + an OK button.
+
+    Dismissing it (OK or escape) hands the app back to the port picker — or the
+    ready state when no port lister is configured — the same fallback a connect
+    Cancel uses (see :meth:`TrecuApp._on_connect_error_ack`). The modal only
+    reports the failure; the app owns what happens next via the dismiss callback.
+    """
+
+    BINDINGS = [("escape", "ok", "OK")]
+
+    DEFAULT_CSS = """
+    ConnectErrorScreen {
+        align: center middle;
+    }
+    #dialog {
+        width: 60;
+        max-width: 90%;
+        height: auto;
+        padding: 1 2;
+        border: thick $error;
+        background: $surface;
+    }
+    #title {
+        width: 100%;
+        content-align: center middle;
+        text-style: bold;
+        color: $error;
+        margin-bottom: 1;
+    }
+    #message { width: 100%; content-align: center middle; margin-bottom: 1; }
+    #buttons { width: 100%; height: auto; align: center middle; }
+    """
+
+    def __init__(self, message: str):
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Middle(id="dialog"):
+            yield Label("Connection failed", id="title")
+            yield Static(self._message, id="message")
+            with Center(id="buttons"):
+                yield Button("OK", variant="primary", id="ok")
+
+    def on_mount(self) -> None:
+        self.query_one("#ok", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss()
+
+    def action_ok(self) -> None:
+        self.dismiss()
+
+
 class TrecuApp(App):
     """Read and decode Triumph ECU fault codes."""
 
@@ -780,10 +835,32 @@ class TrecuApp(App):
             return False
         if error is not None:
             await asyncio.to_thread(svc.close)  # reconnect on next read
-            self._on_error(error)
+            self._on_connect_error(error)
             return False
         self._session = svc  # publish only once fully connected
         return True
+
+    def _on_connect_error(self, exc: Exception) -> None:
+        """A *fresh* connect failed: log it, then show a modal with the error
+        and an OK button that hands back to the port picker (or the ready state
+        when no port lister is configured — the same fallback a connect Cancel
+        uses). Unlike :meth:`_on_error` (read/clear/live failures over an
+        established session, which just surface in the Log), a connect failure
+        blocks the whole session, so it gets a dismissable modal that routes the
+        user back to choosing a port.
+        """
+        self._append_log(f"[error] {exc}")
+        self._set_state("error")
+        self.bell()
+        self.push_screen(ConnectErrorScreen(str(exc)), self._on_connect_error_ack)
+
+    def _on_connect_error_ack(self, _result=None) -> None:
+        """Error modal dismissed: return to port selection (or the ready state
+        when no port lister is configured)."""
+        if self._list_ports is not None:
+            self._choose_port()
+        else:
+            self._set_state("ready")
 
     # -- actions -------------------------------------------------------------
     @work(exclusive=True, group="ecu")
