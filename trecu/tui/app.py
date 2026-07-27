@@ -881,10 +881,18 @@ class TrecuApp(App):
                 svc.close(force=True)
             except Exception:
                 pass
+        # Leaving the connecting modal always leaves the connecting state too.
+        # In particular, keep the title bar accurate while the port picker is
+        # shown after cancelling a real serial-port connection attempt.
+        self._set_state("disconnected")
         if self._list_ports is not None:
-            self._choose_port()
-        else:
-            self._set_state("disconnected")
+            # ConnectingScreen calls us from its own button handler. Pushing
+            # the picker synchronously there makes Textual attach the picker's
+            # result callback to that soon-to-be-dismissed screen. The picker
+            # still closes, but its callback is then dropped — notably when
+            # both dialogs are cancelled with their buttons. Queue the push on
+            # the App's message pump so the result callback remains live.
+            self.call_later(self._choose_port)
 
     def _do_connect(self, svc: DiagnosticService) -> None:
         """Worker-thread body: open + connect ``svc`` (blocking)."""

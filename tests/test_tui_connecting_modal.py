@@ -9,6 +9,8 @@ back to the port picker when a port lister is configured.
 import asyncio
 import threading
 
+from textual.widgets import Header
+
 from trecu.protocol.iso9141 import Iso9141Config
 from trecu.tui.app import ConnectErrorScreen, ConnectingScreen, TrecuApp
 from trecu.tui.port_select import PortSelectScreen
@@ -127,6 +129,9 @@ def test_cancel_returns_to_port_selection_when_lister_configured():
             # The picker returns *immediately* — while the abandoned connect is
             # still blocked (gate not yet released) — not only once it unwinds.
             assert isinstance(app.screen, PortSelectScreen)
+            assert app._state == "disconnected"
+            title = app.query_one(Header).query_one("HeaderTitle").render().plain
+            assert title.endswith("○ disconnected")
             # Releasing the doomed connect leaves no session behind.
             gate.set()
             await pilot.pause(0.4)
@@ -191,10 +196,10 @@ def test_connect_error_modal_returns_to_ready_without_lister():
     asyncio.run(scenario())
 
 
-def test_cancel_picker_after_connect_cancel_quits_app():
-    # The picker that reappears after a connect-cancel must quit on Cancel,
-    # exactly like the startup picker — even while the abandoned connect thread
-    # is still blocked (gate never released here).
+def test_cancel_button_on_picker_after_connect_cancel_quits_app():
+    # The picker that reappears after a connect-cancel must quit when its Cancel
+    # button is activated, exactly like the startup picker — even while the
+    # abandoned connect thread is still blocked (gate never released here).
     gate = threading.Event()
     app = TrecuApp(
         transport_factory=None,
@@ -211,10 +216,10 @@ def test_cancel_picker_after_connect_cancel_quits_app():
             await pilot.press("enter")           # pick a port -> connect stalls
             await pilot.pause(0.2)
             assert isinstance(app.screen, ConnectingScreen)
-            await pilot.press("escape")          # cancel connect -> picker returns
+            await pilot.click("#cancel")         # Cancel button -> picker returns
             await pilot.pause(0.1)
             assert isinstance(app.screen, PortSelectScreen)
-            await pilot.press("escape")          # cancel picker -> quit
+            await pilot.click("#cancel")         # Cancel button -> quit
             await pilot.pause(0.2)
             assert not app.is_running
 
