@@ -258,6 +258,11 @@ class TrecuApp(App):
     TITLE = "TrECU"
     SUB_TITLE = "Triumph ECU fault-code reader"
 
+    # No command palette: trecu's whole surface is the two-key footer, and the
+    # Ctrl+P palette only adds Textual's stock actions (screenshot, theme, …)
+    # that don't belong in a diagnostics tool.
+    ENABLE_COMMAND_PALETTE = False
+
     CSS = """
     #spine {
         height: 1;
@@ -300,15 +305,18 @@ class TrecuApp(App):
     #log { height: 1fr; background: $surface-darken-1; }
     """
 
+    # Footer order is BINDINGS order (filtered per-tab by check_action): arrows
+    # first, then the contextual commands, then quit — a stable left-to-right
+    # shape on every tab even as the middle commands come and go.
     BINDINGS = [
-        Binding("r", "read", "Read"),
-        Binding("c", "clear", "Clear"),
-        Binding("space", "toggle_freeze", "Freeze"),
         # TabbedContent's own left/right bindings switch tabs but are hidden
         # (show=False). Re-declare them at app level with priority so they win
         # the binding chain and appear in the footer.
         Binding("left", "prev_tab", "Prev tab", priority=True),
         Binding("right", "next_tab", "Next tab", priority=True),
+        Binding("r", "read", "Read"),
+        Binding("c", "clear", "Clear"),
+        Binding("space", "toggle_freeze", "Freeze"),
         Binding("q", "quit", "Quit"),
     ]
 
