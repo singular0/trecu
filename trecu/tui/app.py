@@ -708,14 +708,14 @@ class TrecuApp(App):
 
     def _update_faults_card(self, result: ReadResult) -> None:
         if not result.count:
-            text = "[green]✓  No stored fault codes[/]\n\n[dim]Nothing reported by the ECU.[/]"
+            # An empty circle (no colour) signals a clean read.
+            text = "○  No stored fault codes"
         else:
             # A red MIL dot flags stored faults; the count itself stays neutral.
             noun = "code" if result.count == 1 else "codes"
-            lines = [f"[red]●[/]  [b]{result.count}[/] stored fault {noun}", ""]
-            for dtc in result.dtcs:
-                lines.append(f"[b]{dtc.code}[/]")
-            text = "\n".join(lines)
+            # Codes go on one comma-separated line that wraps when there are many.
+            codes = ", ".join(f"[b]{dtc.code}[/]" for dtc in result.dtcs)
+            text = f"[red]●[/]  [b]{result.count}[/] stored fault {noun}\n\n{codes}"
         self.query_one("#card-faults", Static).update(Text.from_markup(text))
 
     def _update_identity_card(self, result: ReadResult) -> None:
