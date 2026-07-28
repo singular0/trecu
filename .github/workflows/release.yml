@@ -143,6 +143,9 @@ jobs:
       - name: Create GitHub Release with artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job only downloads artifacts and has no checkout, so gh cannot
+          # infer the repository from a local .git directory.
+          GH_REPO: ${{ github.repository }}
         run: |
           prerelease_flag=""
           if [ '${{ needs.build.outputs.prerelease }}' = 'true' ]; then
