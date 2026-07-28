@@ -152,6 +152,7 @@ def _cmd_list_ports() -> int:
         print("No serial ports found.")
         return 0
     table = Table()
+    table.add_column("Cable")
     table.add_column("Device")
     table.add_column("VID:PID")
     table.add_column("Description")
@@ -159,8 +160,8 @@ def _cmd_list_ports() -> int:
         vidpid = (
             f"{p['vid']:04x}:{p['pid']:04x}" if p["vid"] and p["pid"] else "-"
         )
-        marker = "  <- likely KKL cable" if p["likely_kkl"] else ""
-        table.add_row(p["device"], vidpid, f"{p['description']}{marker}")
+        marker = "*" if p["likely_kkl"] else ""
+        table.add_row(marker, p["device"], vidpid, p["description"])
     Console().print(table)
     return 0
 

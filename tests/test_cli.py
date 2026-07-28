@@ -98,18 +98,32 @@ def test_ports_command_shows_table(monkeypatch, capsys) -> None:
                 "pid": 0x6001,
                 "description": "FT232R USB UART",
                 "likely_kkl": True,
-            }
+            },
+            {
+                "device": "/dev/ttyS0",
+                "vid": None,
+                "pid": None,
+                "description": "Built-in serial port",
+                "likely_kkl": False,
+            },
         ],
     )
 
     assert main(["ports"]) == 0
     output = capsys.readouterr().out
+    assert "Cable" in output
     assert "Device" in output
     assert "VID:PID" in output
     assert "Description" in output
     assert "/dev/ttyUSB0" in output
     assert "0403:6001" in output
-    assert "likely KKL cable" in output
+    assert "likely KKL cable" not in output
+    rows = {
+        device: next(line for line in output.splitlines() if device in line)
+        for device in ("/dev/ttyUSB0", "/dev/ttyS0")
+    }
+    assert "*" in rows["/dev/ttyUSB0"]
+    assert "*" not in rows["/dev/ttyS0"]
 
 
 def test_tui_command_launches_ui(monkeypatch) -> None:
