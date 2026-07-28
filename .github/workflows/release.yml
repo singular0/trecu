@@ -9,9 +9,9 @@ on:
       # Coarse prefilter; the "Validate semver tag" step enforces real semver.
       - 'v[0-9]*.[0-9]*.[0-9]*'
 
-# Least privilege: only the ability to create a Release is needed.
+# Default to read-only; publishing jobs opt into only the permission they need.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Gate: the package is only built and published if the mock-only suite passes.
@@ -36,10 +36,12 @@ jobs:
       - name: Run test suite (mocks only, no hardware)
         run: python -m pytest
 
-  release:
-    name: Build & publish release
+  build:
+    name: Build distributions
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.semver.outputs.prerelease }}
     steps:
       - name: Checkout (full history for version derivation)
         uses: actions/checkout@v4
@@ -97,12 +99,53 @@ jobs:
             exit 1
           fi
 
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/trecu
+    permissions:
+      # PyPI Trusted Publishing exchanges GitHub's OIDC identity for a
+      # short-lived upload token, so no long-lived API token is stored.
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
       - name: Create GitHub Release with artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           prerelease_flag=""
-          if [ '${{ steps.semver.outputs.prerelease }}' = 'true' ]; then
+          if [ '${{ needs.build.outputs.prerelease }}' = 'true' ]; then
             prerelease_flag="--prerelease"
           fi
           gh release create "${GITHUB_REF_NAME}" dist/* \

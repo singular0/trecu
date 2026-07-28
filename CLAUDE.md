@@ -16,8 +16,7 @@ hand-rolled here on purpose: a KKL cable is a *dumb* FTDI serial adapter, **not*
 an ELM327, so `python-OBD` does not apply, and there is no maintained general
 Python KWP2000 client for a raw K-line. Dependencies are kept small and to
 well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
-(formatting, via textual), `pyserial` (FT232RL VCP access), and optional
-`pyftdi` (direct FTDI/libusb bit-bang init).
+(formatting, via textual), and `pyserial` (FT232RL VCP access).
 
 ## Commands
 

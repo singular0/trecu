@@ -74,26 +74,17 @@ reads live data only — it never flashes or tunes the ECU.** Use at your own ri
 
 ### Install
 
-Each release publishes a built wheel on the project's
-[**GitHub Releases**](https://github.com/singular0/trecu/releases) page. Install
-it straight from there — no clone or build step needed. Replace `X.Y.Z` with the
-latest release version:
+Install the latest release from [PyPI](https://pypi.org/project/trecu/):
 
 ```bash
-pip install https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl
-```
-
-For direct `pyftdi` access, pull in the optional extra:
-
-```bash
-pip install "trecu[ftdi] @ https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl"
+pip install trecu
 ```
 
 Prefer an isolated install for a command-line tool?
-[`pipx`](https://pypa.github.io/pipx/) works with the same URL:
+[`pipx`](https://pypa.github.io/pipx/) installs it into a dedicated environment:
 
 ```bash
-pipx install https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X.Y.Z-py3-none-any.whl
+pipx install trecu
 ```
 
 <details>
@@ -102,7 +93,7 @@ pipx install https://github.com/singular0/trecu/releases/download/vX.Y.Z/trecu-X
 ```bash
 git clone https://github.com/singular0/trecu.git && cd trecu
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"     # add "ftdi" to the extras for direct pyftdi access
+pip install -e ".[dev]"
 ```
 
 The package version is derived from the git tag at build time (via `hatch-vcs`),
