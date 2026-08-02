@@ -317,7 +317,9 @@ def _cmd_tui(args: argparse.Namespace) -> int:
 
     if args.mock:
         # Share one simulated ECU across connects so clearing codes persists,
-        # mirroring how a real ECU retains state between sessions.
+        # mirroring how a real ECU retains state between sessions. Deliberate,
+        # not a workaround: a factory that built a fresh mock per session would
+        # resurrect the codes the user just cleared (see as_transport_factory).
         shared = _make_transport(args, config)
         app = TrecuApp(
             transport_factory=lambda: shared,

@@ -111,6 +111,12 @@ class EcuConfig:
 # What callers may hand to ``DiagnosticService(config=...)``.
 ConfigLike = Union[EcuConfig, Iso9141Config, Kwp2000Config]
 
+#: How a service gets its device: a factory it calls once per session.
+TransportFactory = Callable[[], Transport]
+#: What callers may hand to ``DiagnosticService(transport)`` — see
+#: :func:`as_transport_factory` for what passing an instance means.
+TransportSource = Union[Transport, TransportFactory]
+
 
 def as_ecu_config(config: Optional[ConfigLike]) -> EcuConfig:
     """Normalize any accepted config shape into a full :class:`EcuConfig`."""
@@ -123,6 +129,26 @@ def as_ecu_config(config: Optional[ConfigLike]) -> EcuConfig:
     if isinstance(config, Kwp2000Config):
         return EcuConfig(kwp2000=config)
     raise TypeError(f"unsupported config type: {type(config).__name__}")
+
+
+def as_transport_factory(transport: TransportSource) -> TransportFactory:
+    """Normalize a transport *or* a transport factory into a factory.
+
+    A factory is the service's own shape: :meth:`DiagnosticService.close`
+    releases the device, so the next :meth:`~DiagnosticService.open` builds a
+    fresh one and reconnecting is an operation the service performs rather than
+    something the caller has to rebuild the service for.
+
+    Passing a **transport instance** binds that one device for the service's
+    whole life: every session reopens the same object. That is what a caller
+    wants when the device carries state across sessions — the ``--mock`` TUI
+    shares one simulated ECU so cleared codes stay cleared, like a real bike.
+    """
+    if isinstance(transport, Transport):
+        return lambda: transport
+    if callable(transport):
+        return transport
+    raise TypeError(f"unsupported transport type: {type(transport).__name__}")
 
 
 @dataclass
@@ -139,11 +165,19 @@ class ReadResult:
 
 
 class DiagnosticService:
-    """Owns the transport + protocol client + code database lifecycle."""
+    """Owns the transport + protocol client + code database lifecycle.
+
+    The device is held as a **factory**, not as an instance: one transport is
+    built per session and released on :meth:`close`, so ``close()`` followed by
+    :meth:`open` / :meth:`start_session` reconnects over a *fresh* device
+    without the caller rebuilding the service. Handing a transport instance
+    instead pins that one device for every session (see
+    :func:`as_transport_factory`).
+    """
 
     def __init__(
         self,
-        transport: Transport,
+        transport: TransportSource,
         config: Optional[ConfigLike] = None,
         db: Optional[DtcDatabase] = None,
         logger: Optional[LoggerLike] = None,
@@ -154,7 +188,10 @@ class DiagnosticService:
         progress: Optional[Callable[[str], None]] = None,
         verbose: bool = False,
     ):
-        self.transport = transport
+        self._transport_factory = as_transport_factory(transport)
+        # The device for the current session: built on first use, dropped by
+        # close() so the next session starts from a fresh one.
+        self._transport: Optional[Transport] = None
         # Normalized once, up front, so every candidate in an auto sweep reads
         # its own section instead of the service sniffing the config's type.
         self.config = as_ecu_config(config)
@@ -183,9 +220,26 @@ class DiagnosticService:
         """Protocol selected for the current connection, if connected."""
         return self._active_proto
 
+    @property
+    def transport(self) -> Optional[Transport]:
+        """The device held for the current session (``None`` once closed)."""
+        return self._transport
+
     # -- lifecycle -----------------------------------------------------------
+    def _device(self) -> Transport:
+        """This session's transport, built from the factory on first use."""
+        if self._transport is None:
+            self._transport = self._transport_factory()
+        return self._transport
+
+    def _release_device(self) -> None:
+        """Close the current device and forget it, so the next open is fresh."""
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            transport.close()
+
     def open(self) -> None:
-        self.transport.open()
+        self._device().open()
 
     def _clear_active(self) -> None:
         """Forget all state that belongs to the current transport session."""
@@ -196,6 +250,10 @@ class DiagnosticService:
 
     def close(self, *, force: bool = False) -> None:
         """End the ECU session and release the transport.
+
+        The device is dropped along with it, so a later :meth:`open` /
+        :meth:`start_session` builds a fresh one from the factory — that is what
+        makes reconnecting a service operation rather than a rebuild.
 
         Ordinary close is serialized with reads, clears, and keepalives. For a
         KWP client whose StartDiagnosticSession request succeeded, it first
@@ -210,7 +268,7 @@ class DiagnosticService:
         self._stop_keepalive()
         if force:
             self._clear_active()
-            self.transport.close()
+            self._release_device()
             return
 
         with self._io_lock:
@@ -237,7 +295,7 @@ class DiagnosticService:
                         self._logger.warning(f"stop-communication ignored: {exc}")
             finally:
                 self._clear_active()
-                self.transport.close()
+                self._release_device()
 
     # -- persistent session (F1) --------------------------------------------
     def start_session(
@@ -310,14 +368,14 @@ class DiagnosticService:
         if self._explicit_client is not None:
             return self._explicit_client
         if proto == PROTOCOL_ISO9141:
-            return Iso9141Client(self.transport, self.config.iso9141, self._logger)
+            return Iso9141Client(self._device(), self.config.iso9141, self._logger)
         cfg = self.config.kwp2000
         # One base config serves both KWP variants (e.g. in auto mode); pin the
         # init style to the protocol actually being attempted.
         want = "slow" if proto == PROTOCOL_KWP_SLOW else "fast"
         if cfg.init_mode != want:
             cfg = replace(cfg, init_mode=want)
-        return Kwp2000Client(self.transport, cfg, self._logger)
+        return Kwp2000Client(self._device(), cfg, self._logger)
 
     def _connect(self) -> EcuClient:
         if self._active is not None:

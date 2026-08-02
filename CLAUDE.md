@@ -120,6 +120,19 @@ named. A caller can also inject a pre-built
 callback fires with each candidate label *before* it's probed, so a UI can show
 which protocol the sweep is currently trying (the TUI's connecting modal does).
 
+**The service holds its device as a factory, not an instance.** One transport is
+built per session (lazily, on first use) and released by `close()`, so `close()`
+→ `open()`/`start_session()` reconnects over a **fresh** device — reconnect is a
+service operation rather than something the caller rebuilds the service for.
+`as_transport_factory` normalizes either shape (mirroring `as_ecu_config`):
+handing over a **`Transport` instance** instead pins that one device for every
+session, which is exactly what `trecu tui --mock` wants — one simulated ECU, so
+codes the user clears stay cleared across connects. `service.transport` is the
+device currently held, `None` once closed. The TUI's `SessionController` still
+builds **one service per connect attempt** — not because a service is single-use,
+but because a cancelled attempt keeps running inside *its* service's `_io_lock`
+and must not tear down a newer session (see §2 of `TODO.md`).
+
 **Two lifecycle modes.** One-shot (`with service:` → `open`/`close`) still
 connects lazily on the first operation — that's the CLI's `--read`/`--clear`
 path. **Persistent (F1)** is `service.session()` (a context manager) or

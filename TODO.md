@@ -111,15 +111,41 @@ list — a copy-paste pair waiting to drift.
 Payoff: shrinks `app.py` and makes the connect/cancel state machine testable
 without driving a TUI.
 
-## 3. `DiagnosticService` binds a Transport instance, not a factory
+## 3. `DiagnosticService` binds a Transport instance, not a factory — **done**
 
-`close()` closes the transport, so a service is effectively single-use — which is
-why the TUI holds a `transport_factory` and rebuilds the whole service to
-reconnect (`SessionController.build_service`), and why `_cmd_tui` has to
-hand-share one mock instance across connects (`cli.py:303-308`).
+`close()` closed the transport, so reconnecting worked only because *every*
+transport happens to be re-openable — a promise the `Transport` ABC never made.
+That left the device's lifecycle half-owned by the caller: the TUI held a
+`transport_factory` and rebuilt the whole service to reconnect
+(`SessionController.build_service`), and `_cmd_tui` hand-shared one mock
+instance across connects (`cli.py:303-308`).
 
-- [ ] Take `Callable[[], Transport]` instead of a `Transport`, making reconnect a
-      service operation and deleting the TUI-side workaround.
+- [x] `DiagnosticService(transport)` now takes `Callable[[], Transport]` **or** a
+      `Transport`, normalized by `as_transport_factory()` beside `as_ecu_config()`.
+      The device is built lazily (`_device()`), released by `close()`
+      (`_release_device()`), and exposed as `service.transport` — the device
+      currently held, `None` once closed.
+- [x] Reconnect is therefore a service operation: `close()` →
+      `open()`/`start_session()` gets a **fresh** device from the factory, with
+      no caller-side rebuild and no reliance on `Transport.open()` being
+      re-entrant after a close.
+- [x] `SessionController.build_service` hands the factory over instead of
+      calling it, so the service owns the whole device lifecycle and an attempt
+      that never runs never builds a port.
+- [x] Covered in `tests/test_session.py` (fresh device per session, an instance
+      pinned across sessions, no device built when a service never opens, and
+      the `TypeError` on a non-transport).
+
+Two parts of the original item turned out **not** to be deletable, and are now
+documented as intentional rather than left to be "fixed" again later:
+
+- `SessionController` still builds one service **per connect attempt**. That is
+  §2's cancel isolation, not a single-use workaround: a cancelled attempt keeps
+  running (blocked in serial I/O) inside its own service's `_io_lock`, and
+  sharing one service would let its teardown land on a newer session.
+- `_cmd_tui`'s shared mock stays. It is the *point* of the instance form — a
+  factory that built a fresh mock ECU per session would resurrect the codes the
+  user just cleared.
 
 ## 4. `--protocol auto` silently discards connection flags — **done**
 

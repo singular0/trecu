@@ -19,7 +19,7 @@ from trecu.protocol.kwp2000 import (
     Kwp2000Client,
     ProtocolError,
 )
-from trecu.service import DiagnosticService
+from trecu.service import DiagnosticService, as_transport_factory
 from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
 
@@ -112,6 +112,54 @@ def test_service_can_reconnect_after_close():
     assert spy.connects == 2
     assert spy.session_stops == 2
     assert spy.stops == 2
+
+
+# -- the device comes from a factory -----------------------------------------
+def test_reconnect_after_close_builds_a_fresh_transport():
+    """close() releases the device; the next session builds its own."""
+    built = []
+
+    def factory():
+        t = MockObdTransport()
+        built.append(t)
+        return t
+
+    svc = DiagnosticService(factory, protocol="iso9141")
+    with svc.session(keepalive_interval=0):
+        assert svc.read_faults().count == 1
+        assert svc.transport is built[0]
+    assert svc.transport is None  # released with the session
+
+    with svc.session(keepalive_interval=0):
+        assert svc.read_faults().count == 1
+        assert svc.transport is built[1]  # a fresh device, not the closed one
+    assert len(built) == 2
+
+
+def test_a_transport_instance_binds_one_device_for_every_session():
+    """Handing over an instance pins it — the ``--mock`` TUI's shared ECU."""
+    transport = MockObdTransport()
+    svc = DiagnosticService(transport, protocol="iso9141")
+    with svc.session(keepalive_interval=0):
+        svc.clear_faults()
+    # A second session over the same device still sees the cleared ECU, the way
+    # a real bike retains state between connects.
+    with svc.session(keepalive_interval=0):
+        assert svc.transport is transport
+        assert svc.read_faults().count == 0
+
+
+def test_a_service_that_never_opens_never_builds_a_device():
+    svc = DiagnosticService(
+        lambda: pytest.fail("the factory must not be called"), protocol="iso9141"
+    )
+    svc.close()
+    assert svc.transport is None
+
+
+def test_as_transport_factory_rejects_a_non_transport():
+    with pytest.raises(TypeError):
+        as_transport_factory("/dev/cu.usbserial-3")
 
 
 def test_kwp_close_returns_to_default_session_then_disconnects():

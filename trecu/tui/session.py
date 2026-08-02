@@ -133,11 +133,20 @@ class SessionController:
 
     # -- connect / cancel ----------------------------------------------------
     def build_service(self) -> DiagnosticService:
-        """Construct a service for one connect attempt (the only such place)."""
+        """Construct a service for one connect attempt (the only such place).
+
+        One service **per attempt**, not one per controller, and deliberately
+        so: a cancelled attempt keeps running — blocked in serial I/O, holding
+        that service's ``_io_lock`` — while a fresh attempt may already have
+        started. Separate services keep the doomed one's teardown off the new
+        one's session. The *factory* is handed over rather than called, so the
+        service owns the device's whole lifecycle and an attempt that never runs
+        never builds a port.
+        """
         if self.transport_factory is None:
             raise RuntimeError("no port selected")
         return DiagnosticService(
-            self.transport_factory(),
+            self.transport_factory,
             self._config,
             self._db,
             self._logger,
