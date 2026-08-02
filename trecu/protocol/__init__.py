@@ -11,7 +11,13 @@ from .framing import (
     checksum,
     parse_frame,
 )
-from .kwp2000 import Kwp2000Client, Kwp2000Config, NegativeResponse, ProtocolError
+from .kwp2000 import (
+    EcuClient,
+    Kwp2000Client,
+    Kwp2000Config,
+    NegativeResponse,
+    ProtocolError,
+)
 from .iso9141 import Iso9141Client, Iso9141Config
 from .dtc import Dtc, DtcDatabase, decode_dtc_bytes
 
@@ -25,6 +31,7 @@ __all__ = [
     "build_frame",
     "checksum",
     "parse_frame",
+    "EcuClient",
     "Kwp2000Client",
     "Kwp2000Config",
     "Iso9141Client",

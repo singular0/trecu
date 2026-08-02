@@ -22,6 +22,7 @@ from .protocol.iso9141 import Iso9141Client, Iso9141Config
 from .protocol.pids import FormulaError, KwpLocalTable, PidDatabase, SensorReading
 from .protocol.kwp2000 import (
     ConnectionInfo,
+    EcuClient,
     EcuInfo,
     Kwp2000Client,
     Kwp2000Config,
@@ -109,7 +110,7 @@ class DiagnosticService:
         db: Optional[DtcDatabase] = None,
         logger: Optional[LoggerLike] = None,
         protocol: str = PROTOCOL_AUTO,
-        client: Optional[object] = None,
+        client: Optional[EcuClient] = None,
         pids: Optional[PidDatabase] = None,
         kwp_local: Optional[KwpLocalTable] = None,
         progress: Optional[Callable[[str], None]] = None,
@@ -128,7 +129,7 @@ class DiagnosticService:
         self._progress = progress or (lambda _p: None)
         self.protocol = protocol
         self._explicit_client = client
-        self._active = None            # connected client
+        self._active: Optional[EcuClient] = None   # connected client
         self._active_info: Optional[ConnectionInfo] = None
         self._active_proto = ""
         self._ecu_info: Optional[EcuInfo] = None  # cached for the session
@@ -178,6 +179,8 @@ class DiagnosticService:
             try:
                 if client is not None:
                     if info is not None and info.session_started:
+                        # Genuinely optional — a KWP-only service, outside the
+                        # EcuClient contract, so probe rather than call.
                         stop_session = getattr(
                             client, "stop_diagnostic_session", None
                         )
@@ -253,9 +256,7 @@ class DiagnosticService:
             client = self._active
             if client is None:
                 return
-            fn = getattr(client, "keepalive", None)
-            if fn is not None:
-                fn()
+            client.keepalive()
 
     # -- client construction / connect --------------------------------------
     def _candidate_protocols(self) -> List[str]:
@@ -265,7 +266,7 @@ class DiagnosticService:
             return list(_AUTO_ORDER)
         return [self.protocol]
 
-    def _build_client(self, proto: str):
+    def _build_client(self, proto: str) -> EcuClient:
         if self._explicit_client is not None:
             return self._explicit_client
         if proto == PROTOCOL_ISO9141:
@@ -279,7 +280,7 @@ class DiagnosticService:
             cfg = replace(cfg, init_mode=want)
         return Kwp2000Client(self.transport, cfg, self._logger)
 
-    def _connect(self):
+    def _connect(self) -> EcuClient:
         if self._active is not None:
             return self._active
         errors: List[str] = []
@@ -328,17 +329,14 @@ class DiagnosticService:
         with self._io_lock:
             return self._read_identification(self._connect())
 
-    def _read_identification(self, client) -> Optional[EcuInfo]:
+    def _read_identification(self, client: EcuClient) -> Optional[EcuInfo]:
         """Best-effort identity read, cached so re-reads don't re-query the ECU."""
         if self._ecu_info is not None:
             self._logger.debug("ECU identification: using session cache")
             return self._ecu_info
-        fn = getattr(client, "read_identification", None)
-        if fn is None:
-            return None
         try:
             self._logger.debug("ECU operation: reading identification")
-            self._ecu_info = fn()
+            self._ecu_info = client.read_identification()
         except (ProtocolError, TransportError) as exc:
             self._logger.warning(f"identification skipped: {exc}")
             self._ecu_info = EcuInfo()
@@ -377,19 +375,16 @@ class DiagnosticService:
         with self._io_lock:
             client = self._connect()
             self._logger.debug("ECU operation: reading live data")
-            read = getattr(client, "read_live", None)
-            if read is None:
-                return []
             kwp_table = None
-            if getattr(client, "live_source", "obd_mode01") == "kwp_local":
+            if client.live_source == "kwp_local":
                 kwp_table = self.kwp_local
                 if kwp_table is None:
                     return []
-                frame = read([kwp_table.lid]).get(kwp_table.lid)
+                frame = client.read_live([kwp_table.lid]).get(kwp_table.lid)
             else:
                 if requested is None:
                     requested = list(DEFAULT_LIVE_PIDS)
-                raw = read(requested)
+                raw = client.read_live(requested)
         if kwp_table is not None:
             readings = (
                 [] if frame is None else kwp_table.decode_frame(frame, requested)

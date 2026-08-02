@@ -14,6 +14,7 @@ import pytest
 from trecu.protocol.iso9141 import Iso9141Client
 from trecu.protocol.kwp2000 import (
     ConnectionInfo,
+    EcuClient,
     EcuInfo,
     Kwp2000Client,
     ProtocolError,
@@ -24,9 +25,15 @@ from trecu.transport.mock_obd import MockObdTransport
 
 
 class SpyClient:
-    """Duck-typed protocol client that counts what the service asks of it."""
+    """Duck-typed protocol client that counts what the service asks of it.
+
+    Implements the whole :class:`EcuClient` contract (asserted below) — the
+    service calls those members unguarded, so a spy that drifts from it would
+    fail as an AttributeError rather than a readable assertion.
+    """
 
     dtc_family = None  # structural J2012 decode, like the real clients' default
+    live_source = "obd_mode01"
 
     def __init__(self):
         self.connects = 0
@@ -47,6 +54,9 @@ class SpyClient:
     def read_identification(self) -> EcuInfo:
         return EcuInfo()
 
+    def read_live(self, pids):
+        return {}
+
     def clear_dtcs(self) -> None:
         pass
 
@@ -65,6 +75,10 @@ class SpyClient:
 def _spy_service(spy: SpyClient) -> DiagnosticService:
     # The transport is inert here — the spy client ignores it entirely.
     return DiagnosticService(MockKLineTransport(), client=spy)
+
+
+def test_spy_client_matches_the_real_client_contract():
+    assert isinstance(SpyClient(), EcuClient)
 
 
 # -- session lifecycle -------------------------------------------------------

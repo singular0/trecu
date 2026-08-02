@@ -9,17 +9,17 @@ still vary by model/year and ECU supplier (Keihin vs Sagem), so they live in
 :class:`Kwp2000Config` and can be overridden.
 
 This module is also the home of the *shared* protocol vocabulary
-(:class:`ConnectionInfo`, :class:`EcuInfo`, :class:`ProtocolError`, ...) and of
-the service logic both clients share: the 5-baud slow-init handshake
-(:func:`slow_init_handshake`) and OBD DTC pair parsing
-(:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them from here.
+(:class:`EcuClient`, :class:`ConnectionInfo`, :class:`EcuInfo`,
+:class:`ProtocolError`, ...) and of the service logic both clients share: the
+5-baud slow-init handshake (:func:`slow_init_handshake`) and OBD DTC pair
+parsing (:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them from here.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ..logging import Logger, LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
@@ -148,7 +148,7 @@ def slow_init_handshake(
     bytes, answers with the inverted second key byte, and **requires** the
     ECU's inverted-address close. Returns the two key bytes.
     """
-    if not getattr(transport, "supports_slow_init", False):
+    if not transport.supports_slow_init:
         raise ProtocolError("transport does not support 5-baud slow init")
 
     def read_byte(timeout: float) -> Optional[int]:
@@ -294,6 +294,56 @@ class EcuInfo:
     def summary(self) -> str:
         """Compact one-line identity for a status bar."""
         return " · ".join(v for v in (self.ecu_name, self.vin) if v)
+
+
+@runtime_checkable
+class EcuClient(Protocol):
+    """The surface every protocol client exposes to :mod:`trecu.service`.
+
+    :class:`Iso9141Client` and :class:`Kwp2000Client` are duck-typed peers, not
+    a class hierarchy: they share this contract and nothing else (they speak
+    entirely different wire protocols). Stating it here — the home of the shared
+    vocabulary — turns "add a third client" from a prose checklist into a
+    checkable one: ``isinstance(client, EcuClient)`` verifies every member is
+    present, and a type checker verifies the signatures. Nothing inherits from
+    it; conformance stays structural.
+
+    Two of the members steer decoding that happens in the *service*, not the
+    client, which is why they're part of the contract:
+
+    * ``live_source`` — which table decodes this client's live data
+      (``"obd_mode01"`` -> ``obd_sensors.json``; ``"kwp_local"`` ->
+      ``keihin_sensors.json``, split from one packed frame).
+    * ``dtc_family`` — ``None`` for the structural SAE J2012 decode, or a family
+      letter (``"K"``) to prefix to raw, non-J2012 Keihin fault numbers.
+
+    Both are declared read-only so either a plain class attribute (as in
+    ``Iso9141Client``) or a computed ``@property`` (``Kwp2000Client.dtc_family``,
+    which depends on the configured DTC service) satisfies them.
+
+    ``stop_diagnostic_session`` is deliberately *not* here: it is a KWP-only
+    service, and :meth:`~trecu.service.DiagnosticService.close` probes for it.
+    """
+
+    @property
+    def live_source(self) -> str: ...
+
+    @property
+    def dtc_family(self) -> Optional[str]: ...
+
+    def connect(self) -> ConnectionInfo: ...
+
+    def read_dtcs(self) -> List[Tuple[int, int, int]]: ...
+
+    def read_identification(self) -> EcuInfo: ...
+
+    def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]: ...
+
+    def clear_dtcs(self) -> None: ...
+
+    def keepalive(self) -> None: ...
+
+    def stop_communication(self) -> None: ...
 
 
 class Kwp2000Client:
@@ -488,7 +538,7 @@ class Kwp2000Client:
         the session's key bytes.
         """
         cfg = self.config
-        if not getattr(self.transport, "supports_slow_init", False):
+        if not self.transport.supports_slow_init:
             raise ProtocolError("transport does not support 5-baud slow init")
         last: Optional[Exception] = None
         for attempt in range(max(1, cfg.init_retries)):

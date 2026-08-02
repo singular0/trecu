@@ -130,7 +130,7 @@ class Iso9141Client:
         )
 
     def connect(self) -> ConnectionInfo:
-        if not getattr(self.transport, "supports_slow_init", False):
+        if not self.transport.supports_slow_init:
             raise ProtocolError("transport does not support 5-baud slow init")
         last: Optional[Exception] = None
         for attempt in range(self.config.init_retries):

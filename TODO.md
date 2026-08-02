@@ -1,6 +1,6 @@
 # trecu — architecture review & cleanup backlog
 
-An architecture review of the current tree (~2,900 lines of `trecu/`, 145 tests
+An architecture review of the current tree (~2,900 lines of `trecu/`, 153 tests
 passing in ~50 s), captured as actionable work. This is **maintenance and
 structural debt**, distinct from `ROADMAP.md`, which tracks *features* by phase.
 Nothing here changes what the tool does; it changes how cheaply the roadmap
@@ -28,7 +28,7 @@ follows is where the seams have frayed.
 
 1. **CI on push/PR** (§7) — minutes of work, protects everything else.
 2. **`CLAUDE.md` sync** (§10) — cheap, and every later session reads it first.
-3. **`EcuClient` Protocol** (§1) — unlocks deleting the `getattr` layer.
+3. ~~**`EcuClient` Protocol** (§1)~~ — **done**: the `getattr` layer is gone.
 4. **`--protocol auto` config overrides** (§4) — the only user-visible defect.
 5. **CLI `_with_service` + slow-init retry extraction** (§5) — mechanical, low risk.
 6. ~~**`SessionController` extraction** (§2)~~ and ~~**`app.py` breakup** (§8)~~
@@ -39,16 +39,15 @@ follows is where the seams have frayed.
 
 ---
 
-## 1. The duck-typed client contract is unnamed and unenforced
+## 1. The duck-typed client contract is unnamed and unenforced — **done**
 
-Highest-leverage fix. `CLAUDE.md` describes a precise client interface, but
-nothing in the code states it, so the service defends against its own peers at
-runtime:
+`CLAUDE.md` described a precise client interface, but nothing in the code stated
+it, so the service defended against its own peers at runtime:
 
 - `service.py:256,336,380,384` — four `getattr(client, ...)` probes for
   `keepalive`, `read_identification`, `read_live`, `live_source`. **Both**
-  clients define all four. The probes are dead defensiveness that also silently
-  swallows a genuinely missing method.
+  clients define all four. The probes were dead defensiveness that also silently
+  swallowed a genuinely missing method.
 - `service.py:112,116` — `config: Optional[object]`, `client: Optional[object]`.
 - `service.py:272,274` — `isinstance(self.config, Iso9141Config)` sniffing to
   decide which config a caller meant.
@@ -56,14 +55,25 @@ runtime:
   False)` at `iso9141.py:133`, `kwp2000.py:151,491` — but `Transport` already
   defines that attribute (`base.py:27`).
 
-- [ ] Define `class EcuClient(typing.Protocol)` in `kwp2000.py` (the stated home
-      of shared vocabulary) covering `connect`, `read_dtcs`,
-      `read_identification`, `read_live`, `clear_dtcs`, `keepalive`,
-      `stop_communication`, plus `live_source` / `dtc_family`.
-- [ ] Type `_build_client` / `_active` as `EcuClient`; replace the `getattr`
-      probes with direct calls.
-- [ ] Drop the `getattr(transport, "supports_slow_init", False)` defaults —
+- [x] Defined `class EcuClient(typing.Protocol)` in `kwp2000.py` (the stated home
+      of shared vocabulary), `@runtime_checkable`, covering `connect`,
+      `read_dtcs`, `read_identification`, `read_live`, `clear_dtcs`,
+      `keepalive`, `stop_communication`, plus `live_source` / `dtc_family` —
+      those two declared read-only so a class attribute *or* a computed property
+      (`Kwp2000Client.dtc_family`) satisfies them. Nothing inherits from it.
+- [x] Typed `_build_client` / `_connect` / `_active` / the `client=` injection as
+      `EcuClient`; all four `getattr` probes are now direct calls.
+      `stop_diagnostic_session` stays a `getattr` probe **on purpose** — it is
+      KWP-only, outside the contract, and now says so in a comment.
+- [x] Dropped the `getattr(transport, "supports_slow_init", False)` defaults —
       the base class guarantees the attribute.
+- [x] Covered by `tests/test_client_contract.py` (both clients + the 0x18
+      property variant conform; a client missing `keepalive` does not), plus
+      `SpyClient` in `tests/test_session.py` now implements the full contract and
+      asserts it.
+
+`config` stays `Optional[object]` — which config type is legitimate depends on
+the protocol, and §4 is where that gets resolved.
 
 Payoff: adding a third protocol client gets a checkable checklist instead of a
 prose one.
@@ -218,7 +228,7 @@ It steers every future session here, so its errors compound.
       `-v`. The CLI is now subcommands: `tui|ports|faults|info|sensors|clear|
       version|help` with `--debug` (`cli.py:36-78`). `README.md` is correct;
       `CLAUDE.md` is not.
-- [ ] "88 tests, ~21s" → 145 tests, ~50 s.
+- [ ] "88 tests, ~21s" → 153 tests, ~50 s.
 - [ ] "There is **no PyPI publish** — install is from the release wheel URL" —
       but `release.yml:109-128` has a Trusted-Publishing PyPI job (commit
       f3e3797).

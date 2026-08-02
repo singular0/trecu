@@ -67,10 +67,19 @@ Iso9141Client | Kwp2000Client    ← protocol/*.py; duck-typed, interchangeable
 Transport (transport/base.py)    ← half-duplex byte pipe: serial or mock
 ```
 
-**The two protocol clients are duck-typed peers, not a class hierarchy.** Both
-expose `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
+**The two protocol clients are duck-typed peers, not a class hierarchy** — but
+that surface is *named*: `EcuClient`, a runtime-checkable `typing.Protocol` in
+`kwp2000.py` (the home of the shared vocabulary). Nothing inherits from it;
+conformance stays structural, so a third client is checkable
+(`isinstance(client, EcuClient)`, see `tests/test_client_contract.py`) instead of
+prose-only, and the service calls every member **directly** — no `getattr`
+probes, so a missing method fails loudly rather than being swallowed. It covers
+`connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
 `read_identification() -> EcuInfo`, `read_live(pids) -> dict[pid, data_bytes]`,
-`clear_dtcs()`, `keepalive()`, and `stop_communication()`. `read_live()` polls
+`clear_dtcs()`, `keepalive()`, `stop_communication()`, plus the two
+decode-steering attributes below. `stop_diagnostic_session()` is deliberately
+outside it — a KWP-only service that `DiagnosticService.close()` still probes
+for. `read_live()` polls
 live sensors (Phase 3): iso9141 sends one OBD **Mode 01** request per PID; KWP
 uses **ReadDataByLocalIdentifier** (0x21). Both return *raw* data bytes per
 requested id (an id the ECU doesn't answer is simply omitted) — decoding to
