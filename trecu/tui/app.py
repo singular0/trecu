@@ -39,11 +39,11 @@ from ..protocol.pids import PidDatabase, SensorReading
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
     DEFAULT_POLL_INTERVAL,
-    DiagnosticService,
     ReadResult,
 )
 from ..transport.base import Transport
 from .port_select import PortSelectScreen
+from .session import ConnectOutcome, SessionController, TransportFactory
 
 # Trend sparkline: history length per PID and the block ramp used to draw it.
 _HISTORY = 24
@@ -68,7 +68,6 @@ def _sparkline(values) -> str:
     steps = len(_SPARK) - 1
     return "".join(_SPARK[round((v - lo) / span * steps)] for v in vals)
 
-TransportFactory = Callable[[], Transport]
 PortLister = Callable[[], list]
 TransportForPort = Callable[[str], Transport]
 
@@ -336,15 +335,27 @@ class TrecuApp(App):
         live_pids: Optional[List[int]] = None,
     ):
         super().__init__()
-        self._transport_factory = transport_factory
-        self._config = config
         self._db = db or DtcDatabase.load_default()
         self._pids = pids or PidDatabase.load_default()
         self._mock = mock
         self._protocol = protocol
-        self._verbose = verbose
-        self._keepalive_interval = keepalive_interval
         self._poll_interval = poll_interval
+        # F1: one long-lived session, connected once and held open with a
+        # keepalive ticker — reused across reads/clears/live polls instead of
+        # the old connect-per-keypress model. The controller owns that session
+        # and the single connect/cancel path both Read and the live-poll loop
+        # go through (see tui/session.py).
+        self._ecu = SessionController(
+            transport_factory=transport_factory,
+            config=config,
+            db=self._db,
+            pids=self._pids,
+            logger=self._ecu_logger,
+            protocol=protocol,
+            verbose=verbose,
+            keepalive_interval=keepalive_interval,
+            progress=self._on_connect_probe,
+        )
         # None = let the service pick the source-appropriate default set (OBD
         # DEFAULT_LIVE_PIDS, or every kwp_local channel on the KWP path).
         self._live_pids = list(live_pids) if live_pids is not None else None
@@ -354,20 +365,17 @@ class TrecuApp(App):
         self._transport_for_port = transport_for_port
         self._state = "disconnected"
         self._last: Optional[ReadResult] = None
-        # F1: one long-lived session, connected once and held open with a
-        # keepalive ticker — reused across reads/clears instead of the old
-        # connect-per-keypress model. Built lazily on the first read.
-        self._session: Optional[DiagnosticService] = None
-        # The "connecting..." spinner modal shown during a *fresh* connect, the
-        # in-flight service (so Cancel can force it closed), and a flag set when
-        # the user cancels it (see _connect_with_modal).
+        # The modals raised around a *fresh* connect: the "connecting..."
+        # spinner and the failure dialog. Tracked so a second caller sharing
+        # the same attempt can't stack a duplicate on top.
         self._connecting_screen: Optional[ConnectingScreen] = None
-        self._connecting_service: Optional[DiagnosticService] = None
-        self._cancelled_connect = False
+        self._connect_error_screen: Optional[ConnectErrorScreen] = None
         # Phase 3 live streaming: a paused poll timer (started on entering the
-        # Live Data tab), a re-entrancy guard, per-PID running stats + history,
-        # and a manual freeze toggle. `_streaming` drives the title-bar label.
+        # Live Data tab), a running flag + re-entrancy guard, per-PID running
+        # stats + history, and a manual freeze toggle. `_streaming` drives the
+        # title-bar label.
         self._live_timer = None
+        self._live_running = False
         self._live_busy = False
         self._live_frozen = False
         self._streaming = False
@@ -448,7 +456,7 @@ class TrecuApp(App):
         )
         self._refresh_connection_card()
         self._set_state("disconnected")
-        if self._transport_factory is not None:
+        if self._ecu.can_connect:
             mode = "MOCK ECU (no hardware)" if self._mock else "serial K-line"
             self._append_log(f"TrECU ready — {mode} mode. Press 'r' to read.")
             # Defer until the TabbedContent has finished re-parenting its panes,
@@ -569,62 +577,43 @@ class TrecuApp(App):
             return active == "tab-live"  # freeze only makes sense while streaming
         return True
 
-    # -- persistent session (F1) ---------------------------------------------
-    # These run on the worker thread (via asyncio.to_thread). The session is
-    # built once on first use, then reused: a re-read or clear reuses the open
-    # connection rather than re-initialising the K-line every keypress.
-    def _ensure_session(self) -> DiagnosticService:
-        if self._session is None:
-            svc = DiagnosticService(
-                self._transport_factory(),
-                self._config,
-                self._db,
-                self._ecu_logger,
-                protocol=self._protocol,
-                pids=self._pids,
-                progress=self._on_connect_probe,
-                verbose=self._verbose,
-            )
-            svc.start_session(self._keepalive_interval)
-            self._session = svc
-        return self._session
-
-    def _close_session(self) -> None:
-        """Tear the session down (stop keepalive, stop_communication, close)."""
-        svc, self._session = self._session, None
-        if svc is not None:
-            try:
-                svc.close()
-            except Exception:
-                pass
-
-    def _session_read(self) -> ReadResult:
-        return self._ensure_session().read_faults()
-
-    def _session_clear(self) -> None:
-        self._ensure_session().clear_faults()
-
-    def _session_read_live(self) -> List[SensorReading]:
-        return self._ensure_session().read_live(self._live_pids)
-
     # -- live streaming (Phase 3) --------------------------------------------
     def _sync_live_polling(self) -> None:
-        """Resume the poll loop only while the Live Data tab is active."""
+        """Run the poll loop exactly while the Live Data tab is active.
+
+        Called on every tab switch and after a successful read, so a stream that
+        was stopped by a failed/cancelled connect starts again once the session
+        is back and the user is still looking at Live Data.
+        """
         if self._live_timer is None:
             return
         try:
             active = self.query_one(TabbedContent).active
         except Exception:
             return
-        if active == "tab-live" and self._transport_factory is not None:
-            self._live_frozen = False
-            self._reset_live_table()
-            self._live_timer.resume()
+        if active == "tab-live" and self._ecu.can_connect:
+            self._start_live_polling()
         else:
-            self._live_timer.pause()
-            if self._streaming:
-                self._streaming = False
-                self._refresh_titlebar()
+            self._stop_live_polling()
+
+    def _start_live_polling(self) -> None:
+        # Idempotent: only a real stopped -> running transition resets the
+        # table, so re-syncing mid-stream doesn't throw away the history.
+        if self._live_running:
+            return
+        self._live_running = True
+        self._live_frozen = False
+        self._reset_live_table()
+        self._live_timer.resume()
+
+    def _stop_live_polling(self) -> None:
+        if not self._live_running:
+            return
+        self._live_running = False
+        self._live_timer.pause()
+        if self._streaming:
+            self._streaming = False
+            self._refresh_titlebar()
 
     def _reset_live_table(self) -> None:
         """Clear the table + per-PID history for a fresh streaming session."""
@@ -641,7 +630,7 @@ class TrecuApp(App):
         """Timer tick: kick a background live read unless one is in flight."""
         if self._live_busy or self._live_frozen:
             return
-        if self._transport_factory is None:
+        if not self._ecu.can_connect:
             return
         try:
             if self.query_one(TabbedContent).active != "tab-live":
@@ -655,16 +644,24 @@ class TrecuApp(App):
 
     @work(group="live")
     async def _do_poll_live(self) -> None:
-        if self._session is None:
-            self._set_state("connecting")
         try:
-            readings = await asyncio.to_thread(self._session_read_live)
+            # Entering Live Data while disconnected connects through the *same*
+            # path as Read — cancelable spinner modal, port-picker fallback —
+            # rather than silently blocking the poll on a fresh handshake.
+            if not self._ecu.connected:
+                if not await self._connect_with_modal():
+                    # Cancelled, or failed (already surfaced). Stop the loop
+                    # instead of re-attempting every tick behind the picker /
+                    # error modal; a later successful read restarts it.
+                    self._stop_live_polling()
+                    return
+            readings = await asyncio.to_thread(self._ecu.read_live, self._live_pids)
         except Exception as exc:  # transport/protocol errors surface here
-            self._live_busy = False
-            await asyncio.to_thread(self._close_session)  # reconnect on next entry
+            await asyncio.to_thread(self._ecu.close)  # reconnect on next entry
             self._on_error(exc)
             return
-        self._live_busy = False
+        finally:
+            self._live_busy = False
         # A poll can outlive the Live Data tab (it blocks on the shared I/O lock
         # behind a read/keepalive). If the user has since left the tab,
         # _sync_live_polling already cleared _streaming — don't resurrect it.
@@ -802,7 +799,7 @@ class TrecuApp(App):
             self._append_log("[error] cannot build a transport for the chosen port")
             return
         self._port = device
-        self._transport_factory = lambda: self._transport_for_port(device)
+        self._ecu.transport_factory = lambda: self._transport_for_port(device)
         self._refresh_connection_card()
         self._append_log(f"using port {device}")
         self.action_read()
@@ -818,17 +815,15 @@ class TrecuApp(App):
         transport closed first, then exit — the same clean quit as at startup.
         """
         self.workers.cancel_all()
-        svc, self._connecting_service = self._connecting_service, None
-        if svc is not None:
-            try:
-                svc.close(force=True)
-            except Exception:
-                pass
-        self._close_session()
+        self._ecu.shutdown()
         self.exit()
 
     # -- connecting modal ----------------------------------------------------
     def _show_connecting(self) -> None:
+        # Idempotent: concurrent callers (a Read and a live poll) share one
+        # connect attempt, so only the first raises the spinner.
+        if self._connecting_screen is not None:
+            return
         scr = ConnectingScreen(self._request_cancel_connect, self._port or "—")
         self._connecting_screen = scr
         self.push_screen(scr)
@@ -857,30 +852,19 @@ class TrecuApp(App):
     def _request_cancel_connect(self) -> None:
         """Modal Cancel: abandon the in-flight connect and hand back at once.
 
-        The connect thread can't be interrupted cleanly, but it *is* blocked in
-        serial I/O — so we force its transport closed to unblock that read and
-        release the port, then drop the modal and hand straight back to the
-        **port picker** (if a port lister is configured) or the ready state.
-        Doing this here — rather than waiting for the thread to unwind, which on
-        a slow ``auto`` init sweep can be many seconds — is what makes Cancel
-        feel instant. The now-doomed connect finishes into a closed transport
-        and is discarded by :meth:`_connect_with_modal` (``_cancelled_connect``);
-        because we never publish its service as ``_session``, a re-picked (even
-        different) port still gets a clean, non-overlapping session.
+        :meth:`SessionController.cancel` force-closes the in-flight transport so
+        the connect thread's blocked read unwinds; here we drop the modal and
+        hand straight back to the **port picker** (if a port lister is
+        configured) or the ready state, *without* waiting for that thread — on a
+        slow ``auto`` init sweep that wait would be many seconds, which is what
+        would make Cancel feel dead. The doomed connect is discarded by the
+        controller, which never publishes it as the session, so a re-picked
+        (even different) port still gets a clean, non-overlapping session.
         """
-        if self._cancelled_connect:
+        if not self._ecu.cancel():
             return
-        self._cancelled_connect = True
         self._dismiss_connecting()
         self._append_log("connect cancelled")
-        svc = self._connecting_service
-        if svc is not None:
-            try:
-                # Forced close deliberately bypasses the I/O lock so the
-                # transport closure can unblock the connect thread's read.
-                svc.close(force=True)
-            except Exception:
-                pass
         # Leaving the connecting modal always leaves the connecting state too.
         # In particular, keep the title bar accurate while the port picker is
         # shown after cancelling a real serial-port connection attempt.
@@ -894,52 +878,28 @@ class TrecuApp(App):
             # the App's message pump so the result callback remains live.
             self.call_later(self._choose_port)
 
-    def _do_connect(self, svc: DiagnosticService) -> None:
-        """Worker-thread body: open + connect ``svc`` (blocking)."""
-        svc.start_session(self._keepalive_interval)
+    def _begin_connect(self) -> None:
+        """Controller hook: an attempt is starting — show it as such."""
+        self._set_state("connecting")
+        self._show_connecting()
 
     async def _connect_with_modal(self) -> bool:
         """Establish a fresh session behind a cancelable spinner modal.
 
-        Returns ``True`` once connected, ``False`` if the user cancelled or the
-        connect failed (the error is surfaced in that case). Runs on the event
-        loop from the ``ecu`` worker; the blocking connect is off-thread so the
-        Cancel button stays responsive. The service is built *here* (on the UI
-        thread) rather than in the worker so Cancel has a handle to force it
-        closed — see :meth:`_request_cancel_connect`.
+        The one connect path for the whole TUI: both ``action_read`` and the
+        live-poll loop come through here. Returns ``True`` once connected,
+        ``False`` if the user cancelled or the connect failed (the error is
+        surfaced in that case). Runs on the event loop from a worker; the
+        blocking connect is off-thread inside the controller so the Cancel
+        button stays responsive.
         """
-        self._set_state("connecting")
-        self._cancelled_connect = False
-        self._show_connecting()
-        svc = DiagnosticService(
-            self._transport_factory(),
-            self._config,
-            self._db,
-            self._ecu_logger,
-            protocol=self._protocol,
-            pids=self._pids,
-            progress=self._on_connect_probe,
-            verbose=self._verbose,
-        )
-        self._connecting_service = svc
-        error: Optional[Exception] = None
-        try:
-            await asyncio.to_thread(self._do_connect, svc)
-        except Exception as exc:  # transport/protocol errors surface here
-            error = exc
-        self._connecting_service = None
+        result = await self._ecu.connect(on_start=self._begin_connect)
         self._dismiss_connecting()
-        if self._cancelled_connect:
-            # Cancel already dropped the modal, closed `svc`, and handed back to
-            # the picker. Ensure the (doomed) session is closed and unpublished.
-            await asyncio.to_thread(svc.close)
-            self._session = None
+        if result.outcome is ConnectOutcome.CANCELLED:
+            return False  # cancel already restored the UI and routed onward
+        if result.outcome is ConnectOutcome.FAILED:
+            self._on_connect_error(result.error)
             return False
-        if error is not None:
-            await asyncio.to_thread(svc.close)  # reconnect on next read
-            self._on_connect_error(error)
-            return False
-        self._session = svc  # publish only once fully connected
         return True
 
     def _on_connect_error(self, exc: Exception) -> None:
@@ -951,14 +911,21 @@ class TrecuApp(App):
         blocks the whole session, so it gets a dismissable modal that routes the
         user back to choosing a port.
         """
+        # Idempotent for the same reason as _show_connecting: callers sharing
+        # one attempt each see the failure, but it's one dialog.
+        if self._connect_error_screen is not None:
+            return
         self._append_log(f"[error] {exc}")
         self._set_state("error")
         self.bell()
-        self.push_screen(ConnectErrorScreen(str(exc)), self._on_connect_error_ack)
+        scr = ConnectErrorScreen(str(exc))
+        self._connect_error_screen = scr
+        self.push_screen(scr, self._on_connect_error_ack)
 
     def _on_connect_error_ack(self, _result=None) -> None:
         """Error modal dismissed: return to port selection (or the ready state
         when no port lister is configured)."""
+        self._connect_error_screen = None
         if self._list_ports is not None:
             self._choose_port()
         else:
@@ -967,22 +934,25 @@ class TrecuApp(App):
     # -- actions -------------------------------------------------------------
     @work(exclusive=True, group="ecu")
     async def action_read(self) -> None:
-        if self._transport_factory is None:
+        if not self._ecu.can_connect:
             self._choose_port()
             return
         # A fresh connect runs behind a cancelable "connecting..." spinner modal;
         # a re-read over the held session skips it and is just "reading...".
-        if self._session is None:
+        if not self._ecu.connected:
             if not await self._connect_with_modal():
                 return  # cancelled, or connect failed (already surfaced)
         self._set_state("reading")
         try:
-            result = await asyncio.to_thread(self._session_read)
+            result = await asyncio.to_thread(self._ecu.read_faults)
         except Exception as exc:  # transport/protocol errors surface here
-            await asyncio.to_thread(self._close_session)  # reconnect on next read
+            await asyncio.to_thread(self._ecu.close)  # reconnect on next read
             self._on_error(exc)
             return
         self._populate(result)
+        # A session is up again: restart the stream if the user is sitting on
+        # Live Data (e.g. this read followed a cancelled connect there).
+        self._sync_live_polling()
 
     def action_clear(self) -> None:
         self.push_screen(
@@ -998,9 +968,9 @@ class TrecuApp(App):
     async def _run_clear(self) -> None:
         self._set_state("clearing")
         try:
-            await asyncio.to_thread(self._session_clear)
+            await asyncio.to_thread(self._ecu.clear_faults)
         except Exception as exc:
-            await asyncio.to_thread(self._close_session)  # reconnect on next read
+            await asyncio.to_thread(self._ecu.close)  # reconnect on next read
             self._on_error(exc)
             return
         self._append_log("fault codes cleared; re-reading...")
@@ -1015,4 +985,4 @@ class TrecuApp(App):
     def on_unmount(self) -> None:
         # Close the held session on exit: stop the keepalive ticker, send
         # stop_communication, and release the port.
-        self._close_session()
+        self._ecu.close()

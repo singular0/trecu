@@ -58,7 +58,8 @@ one of these seams, not rewiring the app:
 
 ```
 CLI (cli.py) / TUI (tui/app.py)
-        │
+        │                        ← the TUI's session/connect state machine
+        │                          lives in tui/session.py (no Textual import)
 DiagnosticService (service.py)   ← owns lifecycle; picks the protocol
         │
 Iso9141Client | Kwp2000Client    ← protocol/*.py; duck-typed, interchangeable
@@ -231,32 +232,45 @@ row cursor / scroll lands where the user is looking; it no-ops only when a modal
 owns focus. Because every tab's focus target is always visible (the DTC table is
 never hidden), focus always lands inside the newly active pane — there's no
 hidden-widget strand for `TabbedContent`'s focus-follows-pane handler to snap
-back from. **The session is now mechanism, not just framing
-(roadmap F1 is done):** the app owns *one* long-lived `DiagnosticService`, built
-lazily on the first read (`_ensure_session`), connected once and held open with
-a background keepalive ticker; re-reads and clears reuse it instead of
-re-initialising the K-line per keypress. A failed operation tears the session
-down (`_close_session`) so the next read reconnects cleanly; `on_unmount` closes
-it on exit. While the Live Data poll loop runs the dot reads `streaming...`
+back from. While the Live Data poll loop runs the dot reads `streaming...`
 (bright green) or `frozen` (blue).
-A **fresh** connect (session is `None`) runs behind a `ConnectingScreen` modal —
-a standard `LoadingIndicator` spinner + Cancel button (`_connect_with_modal`);
-re-reads over the held session skip it. The modal names the **target port** and
-the **protocol currently being probed**: the service takes a `progress` callback
+
+**The session lives in `SessionController` (`tui/session.py`), not in the app
+(roadmap F1 is done).** That module is deliberately **Textual-free**: it owns the
+*one* long-lived `DiagnosticService` (`_ecu.session`), is the only place the TUI
+constructs one (`build_service`), and holds the **single connect path** — an
+`async connect()` whose blocking work runs in `asyncio.to_thread`, returning a
+`ConnectResult` of `CONNECTED` / `CANCELLED` / `FAILED`. Connected once and held
+open with a background keepalive ticker, it's reused by re-reads, clears, *and*
+live polls instead of re-initialising the K-line per keypress; a failed operation
+calls `_ecu.close()` so the next connect starts clean, and `on_unmount` closes it
+on exit (`shutdown()` on the exit-without-a-port path force-closes an in-flight
+attempt too). Both entry points — `action_read` and the live-poll worker — go
+through the app's thin `_connect_with_modal`, so **entering Live Data while
+disconnected gets the same spinner, Cancel, and port-picker fallback as a Read**
+(they used to diverge: the poll loop connected silently and blocked). Concurrent
+callers share one attempt rather than opening the port twice.
+
+A **fresh** connect (`_ecu.connected` false) runs behind a `ConnectingScreen`
+modal — a standard `LoadingIndicator` spinner + Cancel button, raised by the
+controller's one-shot `on_start` hook; re-reads over the held session skip it.
+The modal names the **target port** and the **protocol currently being probed**:
+the service takes a `progress` callback
 that fires with each candidate label *before* it's tried, and the app marshals
 it onto the UI thread (`_on_connect_probe` → `set_probing`) so the auto-sweep's
 `iso9141 → kwp-slow → kwp-fast` progression is visible live. Because the blocking
 connect runs off the event loop in `asyncio.to_thread`, it **can't be interrupted
-cleanly**, but it *is* blocked in serial I/O — so Cancel (`_request_cancel_connect`,
-`_cancelled_connect`) **force-closes the in-flight service** to unblock that read
-and release the port, drops the modal, and **hands straight back to the port
-picker** (when a port lister is configured; the ready state otherwise) *without*
-waiting for the thread — which on a slow `auto` init sweep can be many seconds,
-so waiting would make Cancel feel dead. To get that handle, `_connect_with_modal`
-builds the `DiagnosticService` on the UI thread (not in the worker) and stashes
-it as `_connecting_service`. The doomed connect then finishes into a closed
-transport and `_connect_with_modal` discards it; crucially the service is
-published as `_session` **only on full success**, so a re-picked (even different)
+cleanly**, but it *is* blocked in serial I/O — so Cancel (`_request_cancel_connect`
+→ `SessionController.cancel`) **force-closes the in-flight service** to unblock
+that read and release the port, drops the modal, and **hands straight back to the
+port picker** (when a port lister is configured; the ready state otherwise)
+*without* waiting for the thread — which on a slow `auto` init sweep can be many
+seconds, so waiting would make Cancel feel dead. Cancel also **detaches** the
+attempt immediately, so a connect requested *after* it starts fresh instead of
+inheriting the doomed outcome; each attempt therefore carries its **own** cancel
+flag (`_Attempt`), since the abandoned one keeps running and must discard itself
+rather than publish over a newer session. Crucially a service becomes
+`_ecu.session` **only on full success**, so a re-picked (even different)
 port always gets a clean, non-overlapping session. A connect that *fails* (all
 protocol candidates refused) surfaces a `ConnectErrorScreen` modal — the error
 text + an OK button — via `_on_connect_error`; dismissing it (`_on_connect_error_ack`)
@@ -271,10 +285,15 @@ runs reads/clears via `asyncio.to_thread` inside `@work` workers, and the
 protocol logger uses `call_from_thread` to marshal log lines back to the UI
 thread. Don't call blocking transport code directly on the event loop.
 **Live-data polling (Phase 3)** is a `set_interval` timer created paused and
-resumed only while the Live Data tab is active (`_sync_live_polling` — the
-"active view *is* what the session is doing" model); each tick kicks a
+resumed only while the Live Data tab is active (`_sync_live_polling` →
+`_start_live_polling`/`_stop_live_polling`, tracked by `_live_running` so only a
+real stopped→running transition resets the table — the "active view *is* what
+the session is doing" model); each tick kicks a
 `@work(group="live")` reader (guarded by `_live_busy` so ticks can't stack) that
-calls `read_live` off-thread. It replaces nothing — the one-shot Read worker
+connects if needed (behind the shared modal) and calls `read_live` off-thread. A
+cancelled or failed connect there **stops** the loop rather than re-attempting
+every tick behind the modal; a later successful read restarts it (`action_read`
+re-syncs). It replaces nothing — the one-shot Read worker
 (`group="ecu"`) still handles DTCs — but both funnel through the service's
 `_io_lock`, so a poll and a Read serialize on the single wire.
 

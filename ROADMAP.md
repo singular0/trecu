@@ -52,9 +52,10 @@ Delivered:
 - **Half-duplex serialization** — every operation and every beat runs under one
   `DiagnosticService._io_lock`, so keepalive never interleaves with a read/clear
   on the single-wire K-line.
-- **TUI owns one long-lived session** — built lazily on first read
-  (`_ensure_session`), reused across reads/clears, torn down on error for a
-  clean reconnect and on `on_unmount`. The spine shows a `⚡` keepalive lamp.
+- **TUI owns one long-lived session** — held by `SessionController`
+  (`tui/session.py`), reused across reads/clears/live polls, torn down on error
+  for a clean reconnect and on `on_unmount`. The spine shows a `⚡` keepalive
+  lamp.
 - Covered by `tests/test_session.py` (lifecycle, ticker cadence, lock
   serialization, teardown, both clients' keepalive, TUI session reuse).
 
@@ -148,7 +149,7 @@ reliable Mode 01 PID 01 (MIL + count) first and reconciles Mode 03 against it,
 retrying and **raising** rather than returning a false empty. See CLAUDE.md
 "Known real-hardware facts" for the ECU behavior these address.
 
-## Phase 3 — Live sensor data streaming  · **L**  · needs F1 (+ F2) · **done** (OBD path)
+## Phase 3 — Live sensor data streaming  · **L**  · needs F1 (+ F2) · **done** (OBD path; Keihin hardware validation pending)
 
 **Goal:** continuously poll and display RPM, TPS, MAP, O2, coolant temp, battery
 voltage.
@@ -180,6 +181,25 @@ Delivered:
 - **CLI** `--live` (headless one-shot snapshot). Tests in `test_pids.py` +
   `test_live.py` (formula eval, both client paths, service decode/ordering, mock
   movement, TUI poll loop).
+
+### Keihin live sensor data streaming  · **M, hardware-gated**
+
+**Goal:** stream the full Keihin sensor set over KWP using the packed
+`ReadDataByLocalIdentifier 21 80` response, with trustworthy engineering units
+and the same CLI/TUI experience as the confirmed OBD path.
+
+The client, packed-frame decoder, 53-channel data table, mock stream, and UI
+integration already exist. Remaining work:
+
+- Capture real `21 80` frames from a Keihin ECU at known operating points
+  (key-on/engine-off, cold idle, warm idle, and controlled throttle changes).
+- Confirm channel offsets, widths, signedness, divisors, and units against the
+  observed sensor values; correct `data/keihin_sensors.json` without changing
+  protocol code.
+- Verify sustained polling, keepalive coexistence, unsupported-channel
+  handling, and achievable refresh rate on the single-wire K-line.
+- Add capture-derived regression fixtures and mark the Keihin path supported
+  only after the decoded values agree with known measurements.
 
 **Still ahead / deferred niceties** (not blocking Phase 4): user-driven PID
 selection, CSV record, adjustable poll rate, a Dashboard gauge cluster, and the
@@ -377,11 +397,12 @@ Log — timestamped protocol trace (errors in red), auto-shown under `-v`/on err
 #### The persistent session (F1) — now built
 
 The session is now mechanism, not framing. `action_read` / `_run_clear` no
-longer build a fresh service per keypress: the app owns **one long-lived
-`DiagnosticService`**, built lazily on the first read (`_ensure_session`),
-connected once and held open by a background keepalive ticker. Re-reads and
-clears reuse it (`_session_read` / `_session_clear`) rather than re-initialising
-the K-line. A failed operation tears the session down (`_close_session`) so the
+longer build a fresh service per keypress: **one long-lived `DiagnosticService`**
+is owned by a Textual-free `SessionController` (`tui/session.py`), connected once
+behind a cancelable modal and held open by a background keepalive ticker.
+Re-reads, clears, and live polls reuse it rather than re-initialising the K-line,
+and all of them connect through that controller's single connect path. A failed
+operation tears the session down (`_ecu.close()`) so the
 next read reconnects cleanly; `on_unmount` closes it on exit. The spine grows a
 green **`⚡` keepalive lamp** while a session is live — the first honest
 indicator of the "session is doing something" model.

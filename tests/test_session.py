@@ -266,7 +266,7 @@ def test_tui_reuses_one_session_across_reads():
             await pilot.press("r")    # re-read reuses it
             await pilot.pause(0.3)
             assert app.query_one("#dtcs").row_count == 3
-            assert app._session is not None
+            assert app._ecu.connected
 
     asyncio.run(scenario())
     assert builds["n"] == 1           # transport built once -> one session

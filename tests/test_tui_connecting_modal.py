@@ -3,11 +3,13 @@
 Covers that the modal appears while the (off-thread) connect runs, dismisses on
 success, that Cancel abandons the in-flight attempt and tears the resulting
 session down once the stalled handshake finally returns, and that a cancel hands
-back to the port picker when a port lister is configured.
+back to the port picker when a port lister is configured. The live-poll loop
+connects through the *same* path, so it gets the same modal and fallbacks.
 """
 
 import asyncio
 import threading
+import time
 
 from textual.widgets import Header
 
@@ -41,6 +43,16 @@ class GatedObdTransport(MockObdTransport):
     def five_baud_init(self, address: int) -> None:
         self._gate.wait(timeout=5)
         super().five_baud_init(address)
+
+
+async def _wait_for(pilot, cond, timeout=5.0):
+    """Pause until an off-thread TUI operation satisfies ``cond``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError("condition not met within timeout")
 
 
 def _app(gate: threading.Event) -> TrecuApp:
@@ -79,7 +91,7 @@ def test_connecting_modal_shown_then_dismissed_on_success():
             gate.set()  # let the handshake complete
             await pilot.pause(0.8)
             assert not isinstance(app.screen, ConnectingScreen)
-            assert app._session is not None
+            assert app._ecu.connected
             assert app.query_one("#dtcs").row_count == 1  # the default P1108
 
     asyncio.run(scenario())
@@ -101,7 +113,7 @@ def test_connecting_modal_cancel_abandons_connect():
             # connect thread finishes building must be torn down, not kept.
             gate.set()
             await pilot.pause(0.4)
-            assert app._session is None
+            assert not app._ecu.connected
 
     asyncio.run(scenario())
 
@@ -136,7 +148,7 @@ def test_cancel_returns_to_port_selection_when_lister_configured():
             gate.set()
             await pilot.pause(0.4)
             assert isinstance(app.screen, PortSelectScreen)
-            assert app._session is None
+            assert not app._ecu.connected
 
     asyncio.run(scenario())
 
@@ -162,11 +174,11 @@ def test_connect_error_shows_modal_then_returns_to_port_picker():
             await pilot.pause(0.4)
             assert isinstance(app.screen, ConnectErrorScreen)
             assert app._state == "error"
-            assert app._session is None
+            assert not app._ecu.connected
             await pilot.press("enter")           # OK -> back to the picker
             await pilot.pause(0.2)
             assert isinstance(app.screen, PortSelectScreen)
-            assert app._session is None
+            assert not app._ecu.connected
 
     asyncio.run(scenario())
 
@@ -191,7 +203,79 @@ def test_connect_error_modal_returns_to_ready_without_lister():
             await pilot.pause(0.2)
             assert not isinstance(app.screen, ConnectErrorScreen)
             assert app._state == "disconnected"
-            assert app._session is None
+            assert not app._ecu.connected
+
+    asyncio.run(scenario())
+
+
+def test_live_tab_connects_behind_the_same_modal():
+    """Entering Live Data while disconnected gets the Read path's treatment.
+
+    Regression: the live-poll loop connected on its own — no spinner, no Cancel,
+    no fallback — so arrowing onto Live Data after a cancelled or failed connect
+    blocked silently for seconds with no way out.
+    """
+    gate = threading.Event()
+    app = TrecuApp(
+        transport_factory=lambda: GatedObdTransport(gate),
+        mock=True,
+        port="mock",
+        keepalive_interval=0,
+        protocol="iso9141",
+        poll_interval=0.05,
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)                # mount read: connect stalls
+            assert isinstance(app.screen, ConnectingScreen)
+            await pilot.press("escape")           # cancel it -> disconnected
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, ConnectingScreen)
+            app.action_show_tab("tab-live")       # arrow onto Live Data
+            # The poll loop's connect raises the same cancelable modal, rather
+            # than blocking the tick on a silent handshake.
+            await _wait_for(pilot, lambda: isinstance(app.screen, ConnectingScreen))
+            assert app._state == "connecting"
+            await pilot.press("escape")           # Cancel is available here too
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, ConnectingScreen)
+            assert app._state == "disconnected"
+            # Releasing both doomed handshakes leaves no session, and the
+            # stream stops instead of retrying every tick.
+            gate.set()
+            await _wait_for(pilot, lambda: not app._live_running)
+            assert not app._ecu.connected
+
+    asyncio.run(scenario())
+
+
+def test_live_tab_connect_failure_stops_polling():
+    # A failed connect from the live path surfaces the same error modal as a
+    # failed Read, and stops the poll loop rather than re-attempting per tick.
+    app = TrecuApp(
+        transport_factory=lambda: FailingObdTransport(),
+        mock=True,
+        port="mock",
+        config=_FAIL_FAST,
+        keepalive_interval=0,
+        protocol="iso9141",
+        poll_interval=0.05,
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.4)                # mount read -> connect fails
+            assert isinstance(app.screen, ConnectErrorScreen)
+            await pilot.press("enter")            # OK -> ready state (no lister)
+            await pilot.pause(0.2)
+            app.action_show_tab("tab-live")
+            await _wait_for(pilot, lambda: isinstance(app.screen, ConnectErrorScreen))
+            assert app._live_running is False
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, ConnectErrorScreen)
+            assert not app._ecu.connected
 
     asyncio.run(scenario())
 
