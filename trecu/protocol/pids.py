@@ -53,6 +53,17 @@ class FormulaError(ValueError):
     """A PID formula is malformed or uses a disallowed construct."""
 
 
+def format_value(value: float) -> str:
+    """Compact numeric string: integers stay whole, else up to 2 decimals.
+
+    Shared by :meth:`SensorReading.formatted` and by any display that shows a
+    *derived* number in the same shape (the live table's running min/max), so
+    every live figure is rounded identically.
+    """
+    v = round(value, 2)
+    return str(int(v)) if v == int(v) else f"{v:g}"
+
+
 def _ev(node: ast.AST, env: Env) -> float:
     if isinstance(node, ast.Expression):
         return _ev(node.body, env)
@@ -145,8 +156,7 @@ class SensorReading:
 
     def formatted(self) -> str:
         """Compact numeric string: integers stay whole, else up to 2 decimals."""
-        v = round(self.value, 2)
-        return str(int(v)) if v == int(v) else f"{v:g}"
+        return format_value(self.value)
 
 
 class KwpLocalTable:

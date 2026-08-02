@@ -10,7 +10,6 @@ later.
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from datetime import datetime
 from typing import Callable, List, Optional
 
@@ -18,15 +17,11 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Horizontal, Middle
-from textual.screen import ModalScreen
+from textual.containers import Horizontal
 from textual.widgets import (
-    Button,
     DataTable,
     Footer,
     Header,
-    Label,
-    LoadingIndicator,
     RichLog,
     Static,
     TabbedContent,
@@ -35,38 +30,17 @@ from textual.widgets import (
 
 from .. import __version__
 from ..protocol.dtc import DtcDatabase
-from ..protocol.pids import PidDatabase, SensorReading
+from ..protocol.pids import PidDatabase
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     ReadResult,
 )
 from ..transport.base import Transport
+from .live_table import LiveTable
 from .port_select import PortSelectScreen
+from .screens import ConfirmScreen, ConnectErrorScreen, ConnectingScreen
 from .session import ConnectOutcome, SessionController, TransportFactory
-
-# Trend sparkline: history length per PID and the block ramp used to draw it.
-_HISTORY = 24
-_SPARK = "▁▂▃▄▅▆▇█"
-
-
-def _fmt_value(v: float) -> str:
-    """Compact numeric string for the live table (integers stay whole)."""
-    v = round(v, 2)
-    return str(int(v)) if v == int(v) else f"{v:g}"
-
-
-def _sparkline(values) -> str:
-    """Render a value history as unicode block glyphs, autoscaled to its range."""
-    vals = list(values)
-    if not vals:
-        return ""
-    lo, hi = min(vals), max(vals)
-    if hi <= lo:
-        return _SPARK[3] * len(vals)  # flat line -> a mid-level bar
-    span = hi - lo
-    steps = len(_SPARK) - 1
-    return "".join(_SPARK[round((v - lo) / span * steps)] for v in vals)
 
 PortLister = Callable[[], list]
 TransportForPort = Callable[[str], Transport]
@@ -80,176 +54,6 @@ _CONNECTION_STATES = {
     "connected": ("#16a34a", "●", "connected"),
     "error": ("#ef4444", "●", "error"),
 }
-
-
-class ConfirmScreen(ModalScreen[bool]):
-    """A small yes/no modal. Cancel is the default; escape cancels."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    DEFAULT_CSS = """
-    ConfirmScreen {
-        align: center middle;
-    }
-    #dialog {
-        width: 52;
-        height: auto;
-        padding: 1 2;
-        border: thick $warning;
-        background: $surface;
-    }
-    #dialog Label { width: 100%; content-align: center middle; margin-bottom: 1; }
-    #buttons { width: 100%; height: auto; align: center middle; }
-    #buttons Button { margin: 0 1; }
-    """
-
-    def __init__(self, question: str):
-        super().__init__()
-        self._question = question
-
-    def compose(self) -> ComposeResult:
-        with Middle(id="dialog"):
-            yield Label(self._question)
-            with Horizontal(id="buttons"):
-                yield Button("Yes, clear", variant="error", id="yes")
-                yield Button("Cancel", variant="primary", id="no")
-
-    def on_mount(self) -> None:
-        self.query_one("#no", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "yes")
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-
-class ConnectingScreen(ModalScreen):
-    """A modal shown while the K-line session is being established.
-
-    Purely a status overlay: it does *not* own the connect (the app's ``ecu``
-    worker does). It shows the target port and the protocol currently being
-    probed (the auto-sweep tries several in turn — see ``set_probing``), with a
-    standard ``LoadingIndicator`` spinner. Cancel (or escape) calls back into
-    the app. The background connect can't be interrupted mid-handshake — it's
-    blocked in serial I/O — so "cancel" means *stop waiting on it*: the app
-    drops the modal, restores the UI, and tears the session down once the
-    handshake finally returns.
-    """
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    DEFAULT_CSS = """
-    ConnectingScreen {
-        align: center middle;
-    }
-    #dialog {
-        width: 56;
-        height: auto;
-        padding: 1 2;
-        border: thick $accent;
-        background: $surface;
-    }
-    #title { width: 100%; content-align: center middle; text-style: bold; }
-    #detail { width: 100%; content-align: center middle; margin-top: 1; }
-    #spinner { height: 1; margin: 1 0; }
-    #buttons { width: 100%; height: auto; align: center middle; }
-    """
-
-    def __init__(
-        self,
-        on_cancel: Callable[[], None],
-        port: str,
-    ):
-        super().__init__()
-        self._on_cancel = on_cancel
-        self._port = port
-        self._protocol = ""
-
-    def compose(self) -> ComposeResult:
-        with Middle(id="dialog"):
-            yield Label(f"Connecting to ECU via {self._port}", id="title")
-            yield Static(self._detail(), id="detail")
-            yield LoadingIndicator(id="spinner")
-            with Center(id="buttons"):
-                yield Button("Cancel", variant="primary", id="cancel")
-
-    def _detail(self) -> str:
-        if not self._protocol:
-            return "Probing protocol..."
-        return f"Probing {self._protocol} protocol..."
-
-    def set_probing(self, protocol: str) -> None:
-        """Update the 'probing' line as the auto-sweep moves between protocols."""
-        self._protocol = protocol
-        try:
-            self.query_one("#detail", Static).update(self._detail())
-        except Exception:
-            pass  # modal already dismissed
-
-    def on_mount(self) -> None:
-        self.query_one("#cancel", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self._on_cancel()
-
-    def action_cancel(self) -> None:
-        self._on_cancel()
-
-
-class ConnectErrorScreen(ModalScreen):
-    """Shown when a *fresh* connect fails: the error text + an OK button.
-
-    Dismissing it (OK or escape) hands the app back to the port picker — or the
-    ready state when no port lister is configured — the same fallback a connect
-    Cancel uses (see :meth:`TrecuApp._on_connect_error_ack`). The modal only
-    reports the failure; the app owns what happens next via the dismiss callback.
-    """
-
-    BINDINGS = [("escape", "ok", "OK")]
-
-    DEFAULT_CSS = """
-    ConnectErrorScreen {
-        align: center middle;
-    }
-    #dialog {
-        width: 60;
-        max-width: 90%;
-        height: auto;
-        padding: 1 2;
-        border: thick $error;
-        background: $surface;
-    }
-    #title {
-        width: 100%;
-        content-align: center middle;
-        text-style: bold;
-        color: $error;
-        margin-bottom: 1;
-    }
-    #message { width: 100%; content-align: center middle; margin-bottom: 1; }
-    #buttons { width: 100%; height: auto; align: center middle; }
-    """
-
-    def __init__(self, message: str):
-        super().__init__()
-        self._message = message
-
-    def compose(self) -> ComposeResult:
-        with Middle(id="dialog"):
-            yield Label("Connection failed", id="title")
-            yield Static(self._message, id="message")
-            with Center(id="buttons"):
-                yield Button("OK", variant="primary", id="ok")
-
-    def on_mount(self) -> None:
-        self.query_one("#ok", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss()
-
-    def action_ok(self) -> None:
-        self.dismiss()
 
 
 class TrecuApp(App):
@@ -285,8 +89,7 @@ class TrecuApp(App):
     Tab.-has-faults { color: $error; text-style: bold; }
     #dtcs { height: 1fr; }
     #dtcs > .datatable--cursor { background: $accent; }
-    #live { height: 1fr; }
-    #live > .datatable--cursor { background: $accent; }
+    /* The Live Data table styles itself — see LiveTable.DEFAULT_CSS. */
     #log { height: 1fr; background: $surface-darken-1; }
     """
 
@@ -371,16 +174,14 @@ class TrecuApp(App):
         self._connecting_screen: Optional[ConnectingScreen] = None
         self._connect_error_screen: Optional[ConnectErrorScreen] = None
         # Phase 3 live streaming: a paused poll timer (started on entering the
-        # Live Data tab), a running flag + re-entrancy guard, per-PID running
-        # stats + history, and a manual freeze toggle. `_streaming` drives the
-        # title-bar label.
+        # Live Data tab), a running flag + re-entrancy guard, and a manual
+        # freeze toggle. `_streaming` drives the title-bar label; the rows,
+        # per-sensor stats, and sparklines belong to the LiveTable widget.
         self._live_timer = None
         self._live_running = False
         self._live_busy = False
         self._live_frozen = False
         self._streaming = False
-        self._live_stats: dict = {}
-        self._live_columns: list = []
 
     def format_title(self, title: str, sub_title: str) -> Text:
         """Render the app identity and live connection state in the title bar."""
@@ -410,7 +211,7 @@ class TrecuApp(App):
             with TabPane("Faults", id="tab-faults"):
                 yield DataTable(id="dtcs", zebra_stripes=True)
             with TabPane("Live Data", id="tab-live"):
-                yield DataTable(id="live", zebra_stripes=True)
+                yield LiveTable(id="live")
             with TabPane("Log", id="tab-log"):
                 yield RichLog(id="log", markup=False, wrap=True, highlight=False)
         yield Footer()
@@ -419,22 +220,6 @@ class TrecuApp(App):
         table = self.query_one("#dtcs", DataTable)
         table.cursor_type = "row"
         table.add_columns("Code", "Status", "Description")
-        live = self.query_one("#live", DataTable)
-        live.cursor_type = "row"
-        # Keep the column keys: the live table updates rows *in place* (see
-        # _update_live_table) rather than clearing, so it needs them to address
-        # individual cells. The numeric columns get fixed widths so they don't
-        # jitter as values change from tick to tick; the sensor name and the
-        # trend sparkline stay auto-width (the name varies per ECU, and the
-        # sparkline grows toward _HISTORY glyphs as history accumulates).
-        self._live_columns = [
-            live.add_column("Sensor"),
-            live.add_column("Value", width=8),
-            live.add_column("Unit", width=6),
-            live.add_column("Min", width=8),
-            live.add_column("Max", width=8),
-            live.add_column("Trend"),
-        ]
         # Phase 3 poll loop: a repeating timer, created paused and resumed only
         # while the Live Data tab is active (see _sync_live_polling). It kicks a
         # background reader rather than touching the wire on the event loop.
@@ -603,7 +388,7 @@ class TrecuApp(App):
             return
         self._live_running = True
         self._live_frozen = False
-        self._reset_live_table()
+        self.query_one("#live", LiveTable).reset()
         self._live_timer.resume()
 
     def _stop_live_polling(self) -> None:
@@ -614,11 +399,6 @@ class TrecuApp(App):
         if self._streaming:
             self._streaming = False
             self._refresh_titlebar()
-
-    def _reset_live_table(self) -> None:
-        """Clear the table + per-PID history for a fresh streaming session."""
-        self._live_stats = {}
-        self.query_one("#live", DataTable).clear()
 
     def action_toggle_freeze(self) -> None:
         """Pause/resume the live stream in place (keeps the last snapshot)."""
@@ -671,44 +451,12 @@ class TrecuApp(App):
             still_live = False
         if not still_live:
             return
-        self._update_live_table(readings)
+        self.query_one("#live", LiveTable).update_readings(readings)
         self._streaming = True
         if self._state != "connected":
             self._set_state("connected")
         else:
             self._refresh_titlebar()
-
-    def _update_live_table(self, readings: List[SensorReading]) -> None:
-        # Update rows *in place* keyed by PID rather than clearing and rebuilding.
-        # Clearing dropped any PID the ECU skipped this snapshot (it reappeared
-        # only when answered again) and snapped the row cursor back to the top on
-        # every tick. Now a skipped PID keeps its last row, and the cursor stays
-        # put. `_live_stats` tracks exactly the PIDs already given a row (both are
-        # seeded together and reset together in _reset_live_table), so its
-        # membership tells us whether to add a new row or update the existing one.
-        table = self.query_one("#live", DataTable)
-        for r in readings:
-            st = self._live_stats.get(r.pid)
-            is_new = st is None
-            if is_new:
-                st = {"min": r.value, "max": r.value, "hist": deque(maxlen=_HISTORY)}
-                self._live_stats[r.pid] = st
-            st["min"] = min(st["min"], r.value)
-            st["max"] = max(st["max"], r.value)
-            st["hist"].append(r.value)
-            cells = (
-                r.name,
-                r.formatted(),
-                r.unit,
-                _fmt_value(st["min"]),
-                _fmt_value(st["max"]),
-                _sparkline(st["hist"]),
-            )
-            if is_new:
-                table.add_row(*cells, key=str(r.pid))
-            else:
-                for column, value in zip(self._live_columns, cells):
-                    table.update_cell(str(r.pid), column, value, update_width=True)
 
     # -- rendering results ---------------------------------------------------
     def _populate(self, result: ReadResult) -> None:

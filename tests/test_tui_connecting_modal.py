@@ -14,7 +14,8 @@ import time
 from textual.widgets import Header
 
 from trecu.protocol.iso9141 import Iso9141Config
-from trecu.tui.app import ConnectErrorScreen, ConnectingScreen, TrecuApp
+from trecu.tui.app import TrecuApp
+from trecu.tui.screens import ConnectErrorScreen, ConnectingScreen
 from trecu.tui.port_select import PortSelectScreen
 from trecu.transport.base import TransportError
 from trecu.transport.mock_obd import MockObdTransport

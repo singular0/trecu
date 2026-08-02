@@ -217,7 +217,7 @@ tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
 identity), **Faults** (the DTC `DataTable`, always visible — with no codes it
 just shows its column headers and no rows; the "no faults" wording lives on the
 Dashboard's Faults card, not a separate widget swap), **Live Data** (the Phase 3
-streaming `DataTable` — sensor / value / unit / running min / max / trend
+streaming table — sensor / value / unit / running min / max / trend
 sparkline), and **Log** (the raw protocol `RichLog`; error lines are red, and the
 app auto-switches here under `-v` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
@@ -234,6 +234,22 @@ never hidden), focus always lands inside the newly active pane — there's no
 hidden-widget strand for `TabbedContent`'s focus-follows-pane handler to snap
 back from. While the Live Data poll loop runs the dot reads `streaming...`
 (bright green) or `frozen` (blue).
+
+**`app.py` holds only app logic; the views it isn't are their own modules.**
+The four modal screens live in `tui/screens.py` (`ConfirmScreen`,
+`ConnectingScreen`, `ConnectErrorScreen`) and `tui/port_select.py`
+(`PortSelectScreen`) — each a pure dialog that reports its outcome back and owns
+no ECU operation. The Live Data table is a `DataTable` subclass,
+`LiveTable` (`tui/live_table.py`), owning *everything* about how a snapshot is
+displayed: its columns (fixed-width numerics so values don't jitter, auto-width
+name/trend), the per-sensor `_Stats` (running min/max + a `_HISTORY`-deep
+`deque`), the `sparkline()` block-glyph ramp, and its own `DEFAULT_CSS`. The app
+hands it decoded readings (`update_readings`) and tells it when a fresh stream
+starts (`reset`); rows update **in place** keyed by PID, so a PID the ECU skips
+in one snapshot keeps its last row and the row cursor doesn't jump. Numbers are
+formatted by the shared `pids.format_value` — the same helper behind
+`SensorReading.formatted()`, so a reading and its derived min/max round
+identically. Keep new presentation logic in these modules, not in `app.py`.
 
 **The session lives in `SessionController` (`tui/session.py`), not in the app
 (roadmap F1 is done).** That module is deliberately **Textual-free**: it owns the

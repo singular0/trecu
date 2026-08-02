@@ -157,6 +157,7 @@ def test_live_table_keeps_skipped_pids_and_cursor():
     """
     from trecu.protocol.pids import SensorReading
     from trecu.tui.app import TrecuApp
+    from trecu.tui.live_table import LiveTable
 
     app = TrecuApp(
         transport_factory=lambda: MockObdTransport(),
@@ -175,8 +176,8 @@ def test_live_table_keeps_skipped_pids_and_cursor():
 
     async def scenario():
         async with app.run_test() as pilot:
-            table = app.query_one("#live")
-            app._update_live_table(
+            table = app.query_one("#live", LiveTable)
+            table.update_readings(
                 snap(
                     [
                         (0x0C, "RPM", 1000.0, "rpm"),
@@ -191,7 +192,7 @@ def test_live_table_keeps_skipped_pids_and_cursor():
             assert table.cursor_coordinate.row == 1
 
             # Next snapshot skips the throttle PID and moves the others.
-            app._update_live_table(
+            table.update_readings(
                 snap(
                     [
                         (0x0C, "RPM", 2000.0, "rpm"),

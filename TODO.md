@@ -31,9 +31,9 @@ follows is where the seams have frayed.
 3. **`EcuClient` Protocol** (§1) — unlocks deleting the `getattr` layer.
 4. **`--protocol auto` config overrides** (§4) — the only user-visible defect.
 5. **CLI `_with_service` + slow-init retry extraction** (§5) — mechanical, low risk.
-6. ~~**`SessionController` extraction** (§2)~~ — **done**; the rest of §8
-   (modal screens + live-table machinery out of `app.py`) still stands, and is
-   worth doing before Phase 4 adds a fourth tab.
+6. ~~**`SessionController` extraction** (§2)~~ and ~~**`app.py` breakup** (§8)~~
+   — **done**: modal screens and the live table are now their own modules, so
+   Phase 4's extra tab lands in a 736-line `app.py`.
 7. **`LiveDecoder` seam** (§6) — do it *with* the F4 Keihin capture, not before;
    the capture will tell you what the seam actually needs.
 
@@ -137,14 +137,16 @@ failure mode is worse — the flag is just quietly inert. This contradicts
 | `iso9141.py:132-148` vs `kwp2000.py:481-516` | Near-identical slow-init retry loops. |
 | `Iso9141Config:59-67` vs `Kwp2000Config:243-248` | `w4`, `sync_timeout`, `byte_timeout`, `init_retries`, `retry_wait` duplicated field-for-field. |
 | `pids.py:152-293` | `PidDatabase` and `KwpLocalTable` are two wrappers over `Dict[int, PidDef]` with the same four constructors and dunders. |
-| `app.py:53-56` vs `pids.py:146-149` | `_fmt_value` re-implements `SensorReading.formatted()`. |
+| ~~`app.py:53-56` vs `pids.py:146-149`~~ | ~~`_fmt_value` re-implements `SensorReading.formatted()`.~~ **done** — see §8. |
 
 - [ ] One `_with_service()` helper in `cli.py` covering all four commands (also
       drops four `logger = lambda …` E731s).
 - [ ] Compose a shared `SlowInitConfig` and a `slow_init_with_retries()` beside
       `slow_init_handshake` in `kwp2000.py`.
 - [ ] Give `PidDatabase` / `KwpLocalTable` a shared base for the load/dunder half.
-- [ ] Delete `app._fmt_value` in favour of `SensorReading.formatted()`.
+- [x] Delete `app._fmt_value` in favour of a shared `pids.format_value()`
+      (`SensorReading.formatted()` delegates to it) — the live table's running
+      min/max are derived numbers, not readings, so they need the plain helper.
 
 ## 6. The live-data seam is the weakest part of the design
 
@@ -181,14 +183,19 @@ discovered at release time.
       helper — cuts the suite to a few seconds *and* lets tests assert retry
       counts.
 
-## 8. `tui/app.py` is 988 lines
+## 8. `tui/app.py` is 988 lines — **done** (now 736)
 
-- [ ] Move the three modal screens (~170 lines) to
-      `tui/screens.py`, next to the existing `tui/port_select.py`.
-- [ ] Extract the live-table machinery (`_sparkline`, `_live_stats`,
-      `_update_live_table`, `_reset_live_table`) — it's a widget, not app logic.
-- [ ] Replace `_live_stats`' `{"min","max","hist"}` string-keyed dict
-      (`app.py:697`) with a small dataclass.
+- [x] Moved the three modal screens (~170 lines) to `tui/screens.py`, next to
+      the existing `tui/port_select.py`.
+- [x] Extracted the live-table machinery into a `DataTable` subclass,
+      `LiveTable` (`tui/live_table.py`): columns, per-sensor stats, `sparkline`,
+      `update_readings`, `reset`, and the `#live` CSS now live with the widget.
+      `app.py` only hands it readings and resets it on a fresh stream.
+- [x] Replaced `_live_stats`' `{"min","max","hist"}` string-keyed dict with a
+      `_Stats` dataclass (`minimum`/`maximum`/`history`, `seed()` + `add()`).
+- [x] Also closed the §5 `_fmt_value` duplicate rather than relocating it:
+      `pids.format_value()` is now the one formatter, and
+      `SensorReading.formatted()` delegates to it.
 
 ## 9. Dead / speculative API
 
