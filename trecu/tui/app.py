@@ -34,6 +34,7 @@ from ..protocol.pids import PidDatabase
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
     DEFAULT_POLL_INTERVAL,
+    ConfigLike,
     ReadResult,
 )
 from ..transport.base import Transport
@@ -124,7 +125,7 @@ class TrecuApp(App):
     def __init__(
         self,
         transport_factory: Optional[TransportFactory] = None,
-        config: Optional[object] = None,
+        config: Optional[ConfigLike] = None,
         db: Optional[DtcDatabase] = None,
         mock: bool = False,
         port: Optional[str] = None,

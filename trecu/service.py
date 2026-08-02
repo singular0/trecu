@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Callable, Iterable, Iterator, List, Optional
+from typing import Callable, Iterable, Iterator, List, Optional, Union
 
 from .logging import Logger, LoggerLike, as_logger
 from .protocol.dtc import Dtc, DtcDatabase
@@ -88,6 +88,44 @@ class _Keepalive:
 
 
 @dataclass
+class EcuConfig:
+    """Per-bike connection settings for *every* protocol the sweep may try.
+
+    Protocol selection happens per attempt (``auto`` builds a fresh client for
+    each candidate), so a caller's overrides — ``--init-address``,
+    ``--ecu-address``, timeouts — have to be present in whichever section the
+    winning protocol ends up reading. Hence one object carrying both sections,
+    rather than a single config whose *type* implicitly picks the protocol:
+    that older shape had no way to express iso9141 *and* KWP settings at once,
+    so `auto` silently dropped the flags.
+
+    A bare :class:`Iso9141Config` / :class:`Kwp2000Config` is still accepted
+    everywhere a config is (see :func:`as_ecu_config`); it fills its own section
+    and leaves the other at its documented defaults.
+    """
+
+    iso9141: Iso9141Config = field(default_factory=Iso9141Config)
+    kwp2000: Kwp2000Config = field(default_factory=Kwp2000Config)
+
+
+# What callers may hand to ``DiagnosticService(config=...)``.
+ConfigLike = Union[EcuConfig, Iso9141Config, Kwp2000Config]
+
+
+def as_ecu_config(config: Optional[ConfigLike]) -> EcuConfig:
+    """Normalize any accepted config shape into a full :class:`EcuConfig`."""
+    if config is None:
+        return EcuConfig()
+    if isinstance(config, EcuConfig):
+        return config
+    if isinstance(config, Iso9141Config):
+        return EcuConfig(iso9141=config)
+    if isinstance(config, Kwp2000Config):
+        return EcuConfig(kwp2000=config)
+    raise TypeError(f"unsupported config type: {type(config).__name__}")
+
+
+@dataclass
 class ReadResult:
     key_bytes: bytes
     dtcs: List[Dtc] = field(default_factory=list)
@@ -106,7 +144,7 @@ class DiagnosticService:
     def __init__(
         self,
         transport: Transport,
-        config: Optional[object] = None,
+        config: Optional[ConfigLike] = None,
         db: Optional[DtcDatabase] = None,
         logger: Optional[LoggerLike] = None,
         protocol: str = PROTOCOL_AUTO,
@@ -117,7 +155,9 @@ class DiagnosticService:
         verbose: bool = False,
     ):
         self.transport = transport
-        self.config = config
+        # Normalized once, up front, so every candidate in an auto sweep reads
+        # its own section instead of the service sniffing the config's type.
+        self.config = as_ecu_config(config)
         self.db = db or DtcDatabase.load_default()
         self.pids = pids or PidDatabase.load_default()
         # The KWP/Keihin packed-frame channel table (its own data file); used
@@ -270,9 +310,8 @@ class DiagnosticService:
         if self._explicit_client is not None:
             return self._explicit_client
         if proto == PROTOCOL_ISO9141:
-            cfg = self.config if isinstance(self.config, Iso9141Config) else Iso9141Config()
-            return Iso9141Client(self.transport, cfg, self._logger)
-        cfg = self.config if isinstance(self.config, Kwp2000Config) else Kwp2000Config()
+            return Iso9141Client(self.transport, self.config.iso9141, self._logger)
+        cfg = self.config.kwp2000
         # One base config serves both KWP variants (e.g. in auto mode); pin the
         # init style to the protocol actually being attempted.
         want = "slow" if proto == PROTOCOL_KWP_SLOW else "fast"

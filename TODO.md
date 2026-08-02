@@ -1,7 +1,7 @@
 # trecu — architecture review & cleanup backlog
 
-An architecture review of the current tree (~2,900 lines of `trecu/`, 153 tests
-passing in ~50 s), captured as actionable work. This is **maintenance and
+An architecture review of the current tree (~2,900 lines of `trecu/`, 163 tests
+passing in ~53 s), captured as actionable work. This is **maintenance and
 structural debt**, distinct from `ROADMAP.md`, which tracks *features* by phase.
 Nothing here changes what the tool does; it changes how cheaply the roadmap
 phases can be built on top.
@@ -29,7 +29,9 @@ follows is where the seams have frayed.
 1. **CI on push/PR** (§7) — minutes of work, protects everything else.
 2. **`CLAUDE.md` sync** (§10) — cheap, and every later session reads it first.
 3. ~~**`EcuClient` Protocol** (§1)~~ — **done**: the `getattr` layer is gone.
-4. **`--protocol auto` config overrides** (§4) — the only user-visible defect.
+4. ~~**`--protocol auto` config overrides** (§4)~~ — **done**: the only
+   user-visible defect; `EcuConfig` carries both protocol sections through the
+   sweep.
 5. **CLI `_with_service` + slow-init retry extraction** (§5) — mechanical, low risk.
 6. ~~**`SessionController` extraction** (§2)~~ and ~~**`app.py` breakup** (§8)~~
    — **done**: modal screens and the live table are now their own modules, so
@@ -72,8 +74,8 @@ it, so the service defended against its own peers at runtime:
       `SpyClient` in `tests/test_session.py` now implements the full contract and
       asserts it.
 
-`config` stays `Optional[object]` — which config type is legitimate depends on
-the protocol, and §4 is where that gets resolved.
+`config` stayed `Optional[object]` here — which config type is legitimate depends
+on the protocol. §4 resolved it: `Optional[ConfigLike]`.
 
 Payoff: adding a third protocol client gets a checkable checklist instead of a
 prose one.
@@ -119,12 +121,11 @@ hand-share one mock instance across connects (`cli.py:303-308`).
 - [ ] Take `Callable[[], Transport]` instead of a `Transport`, making reconnect a
       service operation and deleting the TUI-side workaround.
 
-## 4. `--protocol auto` silently discards connection flags
+## 4. `--protocol auto` silently discards connection flags — **done**
 
-`cli.py:98` returns `None` for auto, so `--init-address`, `--ecu-address`,
-`--tester-address`, and `--timeout` are dropped in the **default** mode.
-Meanwhile `_make_transport` *does* honour `--init-address` for the mock.
-Verified:
+`_make_config` returned `None` for auto, so `--init-address`, `--ecu-address`,
+`--tester-address`, and `--timeout` were dropped in the **default** mode.
+Meanwhile `_make_transport` *did* honour `--init-address` for the mock:
 
 ```
 $ trecu faults --mock --init-address 0x43
@@ -132,12 +133,32 @@ error: could not connect: iso9141: 5-baud init failed: no 0x55 sync byte ...
 ```
 
 The mock ECU moved to `0x43`; the client stayed at `0x33`. On real hardware the
-failure mode is worse — the flag is just quietly inert. This contradicts
+failure mode was worse — the flag was just quietly inert. This contradicted
 `CLAUDE.md`'s own rule that per-bike values must be overridable.
 
-- [ ] Carry the overrides through auto mode: either one config object holding
-      both protocol sections, or an override dict applied per candidate in
-      `_build_client`.
+- [x] Added `EcuConfig` (`service.py`) — one object with an `iso9141` and a
+      `kwp2000` section, so both survive a sweep that builds a fresh client per
+      candidate. `_build_client` reads its candidate's section; the
+      `isinstance(self.config, …)` sniffing is gone.
+- [x] `as_ecu_config()` normalizes in `DiagnosticService.__init__`, so a bare
+      `Iso9141Config` / `Kwp2000Config` (what tests and the TUI pass) still
+      works — it fills its own section and leaves the other at its defaults.
+- [x] The four CLI flags now default to `None` = "leave that protocol's default
+      alone" (their `--help` text still names the default), and `_make_config`
+      fills **both** sections in every mode. Without this the CLI's own
+      `--timeout` default would have flattened the two protocols' genuinely
+      different `p2_timeout` defaults (0.8 vs 1.0) in auto mode.
+- [x] `_make_transport(args, config)` builds the mock ECU from that same
+      config, so an override moves the simulated ECU and the tester together
+      rather than only one of them.
+- [x] Covered by `tests/test_connection_config.py` (10 tests: flag→section
+      mapping, normalization, per-candidate section selection, the CLI repro
+      above, and an auto sweep that only reaches `kwp-slow` if the
+      `--ecu-address` override survived it).
+
+This also resolves §1's leftover: `config` is now typed `Optional[ConfigLike]`
+(`EcuConfig | Iso9141Config | Kwp2000Config`) rather than `Optional[object]`,
+in the service and in the TUI's `SessionController` / `TrecuApp`.
 
 ## 5. Duplication worth collapsing
 
@@ -228,7 +249,7 @@ It steers every future session here, so its errors compound.
       `-v`. The CLI is now subcommands: `tui|ports|faults|info|sensors|clear|
       version|help` with `--debug` (`cli.py:36-78`). `README.md` is correct;
       `CLAUDE.md` is not.
-- [ ] "88 tests, ~21s" → 153 tests, ~50 s.
+- [ ] "88 tests, ~21s" → 163 tests, ~53 s.
 - [ ] "There is **no PyPI publish** — install is from the release wheel URL" —
       but `release.yml:109-128` has a Trusted-Publishing PyPI job (commit
       f3e3797).

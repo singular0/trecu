@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from typing import List, Optional
 
 from . import __version__
@@ -16,6 +17,7 @@ from .service import (
     PROTOCOL_KWP_FAST,
     PROTOCOL_KWP_SLOW,
     DiagnosticService,
+    EcuConfig,
 )
 from .transport.base import Transport, TransportError
 
@@ -64,10 +66,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "confirmed Sagem Triumph), kwp-slow (KWP2000 with 5-baud init, "
         "Keihin K-line), or kwp-fast (KWP2000 fast-init)",
     )
-    conn.add_argument("--init-address", type=lambda x: int(x, 0), default=0x33, help="ISO 9141 5-baud init address (default 0x33; some Sagem models use 0x43)")
-    conn.add_argument("--ecu-address", type=lambda x: int(x, 0), default=0xD5, help="KWP2000 ECU target address (default 0xD5, the Triumph engine ECU)")
-    conn.add_argument("--tester-address", type=lambda x: int(x, 0), default=0xF5, help="KWP2000 tester source address (default 0xF5)")
-    conn.add_argument("--timeout", type=float, default=1.0, help="response timeout seconds (default 1.0)")
+    # These four default to None rather than to a value: unset means "leave the
+    # protocol config's documented default alone", so only what the user
+    # actually passed overrides it — in every protocol mode, auto included.
+    conn.add_argument("--init-address", type=lambda x: int(x, 0), default=None, help="ISO 9141 5-baud init address (default 0x33; some Sagem models use 0x43)")
+    conn.add_argument("--ecu-address", type=lambda x: int(x, 0), default=None, help="KWP2000 ECU target address (default 0xD5, the Triumph engine ECU)")
+    conn.add_argument("--tester-address", type=lambda x: int(x, 0), default=None, help="KWP2000 tester source address (default 0xF5)")
+    conn.add_argument("--timeout", type=float, default=None, help="response timeout seconds (default: the protocol's own, 0.8 ISO 9141 / 1.0 KWP2000)")
 
     options = p.add_argument_group("options")
     options.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation when clearing faults")
@@ -79,29 +84,39 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _make_config(args: argparse.Namespace):
-    """Build a protocol-specific config, or None for auto (service uses defaults)."""
+def _make_config(args: argparse.Namespace) -> EcuConfig:
+    """Build the connection config for *every* protocol the run may try.
+
+    Both sections are always filled, because `auto` builds a fresh client per
+    candidate: an override has to be present in whichever section the winning
+    protocol reads. Only flags the user actually passed override a protocol's
+    own documented default (they parse as None otherwise).
+    """
+    iso = Iso9141Config(baudrate=args.baud)
+    kwp = Kwp2000Config(baudrate=args.baud)
+    if args.init_address is not None:
+        iso = replace(iso, init_address=args.init_address)
+    if args.ecu_address is not None:
+        kwp = replace(kwp, ecu_address=args.ecu_address)
+    if args.tester_address is not None:
+        kwp = replace(kwp, tester_address=args.tester_address)
+    if args.timeout is not None:
+        iso = replace(iso, p2_timeout=args.timeout)
+        kwp = replace(kwp, p2_timeout=args.timeout)
     if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
-        return Kwp2000Config(
-            ecu_address=args.ecu_address,
-            tester_address=args.tester_address,
-            baudrate=args.baud,
-            p2_timeout=args.timeout,
-            init_mode="slow" if args.protocol == PROTOCOL_KWP_SLOW else "fast",
+        # In auto mode the service pins init_mode per candidate itself.
+        kwp = replace(
+            kwp, init_mode="slow" if args.protocol == PROTOCOL_KWP_SLOW else "fast"
         )
-    if args.protocol == PROTOCOL_ISO9141:
-        return Iso9141Config(
-            init_address=args.init_address,
-            baudrate=args.baud,
-            p2_timeout=args.timeout,
-        )
-    return None  # auto: let the service pick per-attempt defaults
+    return EcuConfig(iso9141=iso, kwp2000=kwp)
 
 
-def _make_transport(args: argparse.Namespace) -> Transport:
+def _make_transport(args: argparse.Namespace, config: EcuConfig) -> Transport:
     if args.mock:
         # Seed the simulated ECU with a random, type-varied set of real DB codes
         # so `--mock` shows a plausible spread of faults, not one canned code.
+        # Addresses come from the same config the client will use, so an
+        # override moves the simulated ECU and the tester together.
         pairs = DtcDatabase.load_default().random_dtcs()
         if args.protocol in (PROTOCOL_KWP_FAST, PROTOCOL_KWP_SLOW):
             from .transport.mock_kline import MockKLineTransport
@@ -109,13 +124,15 @@ def _make_transport(args: argparse.Namespace) -> Transport:
             triples = [(hi, lo, STATUS_CONFIRMED) for hi, lo in pairs]
             return MockKLineTransport(
                 dtcs=triples or None,
-                ecu_address=args.ecu_address,
-                tester_address=args.tester_address,
+                ecu_address=config.kwp2000.ecu_address,
+                tester_address=config.kwp2000.tester_address,
                 supports_slow_init=(args.protocol == PROTOCOL_KWP_SLOW),
             )
         from .transport.mock_obd import MockObdTransport
 
-        return MockObdTransport(init_address=args.init_address, dtcs=pairs or None)
+        return MockObdTransport(
+            init_address=config.iso9141.init_address, dtcs=pairs or None
+        )
     from .transport.serial_kline import KLineSerialTransport
 
     port = args.port or _autodetect_port()
@@ -186,9 +203,9 @@ def _print_dtcs(result) -> None:
 
 def _cmd_read(args: argparse.Namespace) -> int:
     logger = lambda m: print(m, file=sys.stderr)
-    transport = _make_transport(args)
+    config = _make_config(args)
     service = DiagnosticService(
-        transport, _make_config(args), logger=logger,
+        _make_transport(args, config), config, logger=logger,
         protocol=args.protocol, verbose=args.debug
     )
     try:
@@ -206,9 +223,9 @@ def _cmd_info(args: argparse.Namespace) -> int:
     from rich.table import Table
 
     logger = lambda m: print(m, file=sys.stderr)
-    transport = _make_transport(args)
+    config = _make_config(args)
     service = DiagnosticService(
-        transport, _make_config(args), logger=logger,
+        _make_transport(args, config), config, logger=logger,
         protocol=args.protocol, verbose=args.debug
     )
     try:
@@ -251,9 +268,9 @@ def _print_live(readings) -> None:
 
 def _cmd_live(args: argparse.Namespace) -> int:
     logger = lambda m: print(m, file=sys.stderr)
-    transport = _make_transport(args)
+    config = _make_config(args)
     service = DiagnosticService(
-        transport, _make_config(args), logger=logger,
+        _make_transport(args, config), config, logger=logger,
         protocol=args.protocol, verbose=args.debug
     )
     try:
@@ -273,9 +290,9 @@ def _cmd_clear(args: argparse.Namespace) -> int:
             print("Aborted.")
             return 1
     logger = lambda m: print(m, file=sys.stderr)
-    transport = _make_transport(args)
+    config = _make_config(args)
     service = DiagnosticService(
-        transport, _make_config(args), logger=logger,
+        _make_transport(args, config), config, logger=logger,
         protocol=args.protocol, verbose=args.debug
     )
     try:
@@ -291,8 +308,9 @@ def _cmd_clear(args: argparse.Namespace) -> int:
 def _cmd_tui(args: argparse.Namespace) -> int:
     from .tui.app import TrecuApp
 
+    config = _make_config(args)
     common = dict(
-        config=_make_config(args),
+        config=config,
         protocol=args.protocol,
         verbose=args.debug,
     )
@@ -300,7 +318,7 @@ def _cmd_tui(args: argparse.Namespace) -> int:
     if args.mock:
         # Share one simulated ECU across connects so clearing codes persists,
         # mirroring how a real ECU retains state between sessions.
-        shared = _make_transport(args)
+        shared = _make_transport(args, config)
         app = TrecuApp(
             transport_factory=lambda: shared,
             mock=True,

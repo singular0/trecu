@@ -35,6 +35,7 @@ from ..protocol.pids import PidDatabase, SensorReading
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
     PROTOCOL_AUTO,
+    ConfigLike,
     DiagnosticService,
     ReadResult,
 )
@@ -89,7 +90,7 @@ class SessionController:
         self,
         *,
         transport_factory: Optional[TransportFactory] = None,
-        config: Optional[object] = None,
+        config: Optional[ConfigLike] = None,
         db: Optional[DtcDatabase] = None,
         pids: Optional[PidDatabase] = None,
         logger: Optional[LoggerLike] = None,

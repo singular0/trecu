@@ -112,7 +112,10 @@ client per attempt and keeping the first that `connect()`s. `iso9141` is first
 because it's the confirmed real-Triumph path (5-baud slow init + OBD-II);
 `kwp-slow` is `Kwp2000Client` with `init_mode="slow"` (5-baud init at the ECU
 address `0xD5`, the Keihin K-line fallback — the service pins `init_mode`
-per attempt via `dataclasses.replace`). A caller can also inject a pre-built
+per attempt via `dataclasses.replace`). Each candidate reads its **own section**
+of the service's `EcuConfig` (see "Protocol values vary by model"), so a
+per-bike override survives the sweep instead of applying only when a protocol is
+named. A caller can also inject a pre-built
 `client=` to bypass selection entirely (used by tests). An optional `progress`
 callback fires with each candidate label *before* it's probed, so a UI can show
 which protocol the sweep is currently trying (the TUI's connecting modal does).
@@ -330,6 +333,19 @@ model years. Every such value lives in a `@dataclass` config (`Iso9141Config`,
 `Kwp2000Config`) with documented defaults, overridable via CLI flags
 (`--init-address`, `--ecu-address`, …). When a value might differ per bike, add
 it to the config rather than inlining a constant.
+
+**Both configs travel together in one `EcuConfig`** (`service.py`: an `iso9141`
+and a `kwp2000` section). Protocol selection happens *per attempt*, so a single
+config whose **type** implied the protocol could not express both at once —
+which is why `auto`, the default mode, used to drop every connection flag on the
+floor. `DiagnosticService` normalizes whatever it's handed through
+`as_ecu_config()`: `None` → all defaults, a bare `Iso9141Config`/`Kwp2000Config`
+→ that section (the other stays at its documented defaults), so callers and
+tests can still pass one config. In the CLI those four flags parse as `None`
+when unset — meaning "leave that protocol's own default alone", since e.g. the
+two `p2_timeout` defaults genuinely differ (0.8 vs 1.0) and a CLI default would
+flatten them — and `_make_transport` builds the **mock ECU from the same
+config**, so an override moves the simulated ECU and the tester together.
 
 ## Known real-hardware facts (from a live bike, not derivable from code)
 
