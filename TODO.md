@@ -1,7 +1,7 @@
 # trecu — architecture review & cleanup backlog
 
-An architecture review of the current tree (~2,900 lines of `trecu/`, 163 tests
-passing in ~53 s), captured as actionable work. This is **maintenance and
+An architecture review of the current tree (~5,000 lines of `trecu/`, 182 tests
+passing in ~56 s), captured as actionable work. This is **maintenance and
 structural debt**, distinct from `ROADMAP.md`, which tracks *features* by phase.
 Nothing here changes what the tool does; it changes how cheaply the roadmap
 phases can be built on top.
@@ -32,7 +32,8 @@ follows is where the seams have frayed.
 4. ~~**`--protocol auto` config overrides** (§4)~~ — **done**: the only
    user-visible defect; `EcuConfig` carries both protocol sections through the
    sweep.
-5. **CLI `_with_service` + slow-init retry extraction** (§5) — mechanical, low risk.
+5. ~~**CLI `_with_service` + slow-init retry extraction** (§5)~~ — **done**:
+   all four duplicate pairs collapsed.
 6. ~~**`SessionController` extraction** (§2)~~ and ~~**`app.py` breakup** (§8)~~
    — **done**: modal screens and the live table are now their own modules, so
    Phase 4's extra tab lands in a 736-line `app.py`.
@@ -186,24 +187,55 @@ This also resolves §1's leftover: `config` is now typed `Optional[ConfigLike]`
 (`EcuConfig | Iso9141Config | Kwp2000Config`) rather than `Optional[object]`,
 in the service and in the TUI's `SessionController` / `TrecuApp`.
 
-## 5. Duplication worth collapsing
+## 5. Duplication worth collapsing — **done**
 
 | Where | What |
 |---|---|
-| `cli.py:187-288` | `_cmd_read`/`_cmd_info`/`_cmd_live`/`_cmd_clear` repeat the same transport+service build, `with service:`, and `except (TransportError, ProtocolError) → return 2`. |
-| `iso9141.py:132-148` vs `kwp2000.py:481-516` | Near-identical slow-init retry loops. |
-| `Iso9141Config:59-67` vs `Kwp2000Config:243-248` | `w4`, `sync_timeout`, `byte_timeout`, `init_retries`, `retry_wait` duplicated field-for-field. |
-| `pids.py:152-293` | `PidDatabase` and `KwpLocalTable` are two wrappers over `Dict[int, PidDef]` with the same four constructors and dunders. |
+| ~~`cli.py:187-288`~~ | ~~`_cmd_read`/`_cmd_info`/`_cmd_live`/`_cmd_clear` repeat the same transport+service build, `with service:`, and `except (TransportError, ProtocolError) → return 2`.~~ |
+| ~~`iso9141.py:132-148` vs `kwp2000.py:481-516`~~ | ~~Near-identical slow-init retry loops.~~ |
+| ~~`Iso9141Config:59-67` vs `Kwp2000Config:243-248`~~ | ~~`w4`, `sync_timeout`, `byte_timeout`, `init_retries`, `retry_wait` duplicated field-for-field.~~ |
+| ~~`pids.py:152-293`~~ | ~~`PidDatabase` and `KwpLocalTable` are two wrappers over `Dict[int, PidDef]` with the same four constructors and dunders.~~ |
 | ~~`app.py:53-56` vs `pids.py:146-149`~~ | ~~`_fmt_value` re-implements `SensorReading.formatted()`.~~ **done** — see §8. |
 
-- [ ] One `_with_service()` helper in `cli.py` covering all four commands (also
-      drops four `logger = lambda …` E731s).
-- [ ] Compose a shared `SlowInitConfig` and a `slow_init_with_retries()` beside
-      `slow_init_handshake` in `kwp2000.py`.
-- [ ] Give `PidDatabase` / `KwpLocalTable` a shared base for the load/dunder half.
+- [x] One `_with_service(args, operation, show)` in `cli.py` behind all four ECU
+      commands, each now a single line. It owns the config, the transport built
+      from that same config, the `with service:` lifecycle, and the exit-2
+      mapping; `show` runs *after* the session closes, so a formatting bug can't
+      read as a connection error. The four `logger = lambda …` E731s are one
+      `_stderr` function, and `_cmd_info`'s inline table is a `_print_info`
+      beside the other two printers.
+- [x] Composed `SlowInitConfig` (the five handshake/retry fields) and
+      `slow_init_with_retries()` beside `slow_init_handshake` in `kwp2000.py`.
+      Both configs now carry a `slow_init` section instead of repeating the
+      fields, mirroring how `EcuConfig` sections its two protocols; only the
+      init *address* stays per-protocol, because that is a protocol fact and not
+      handshake timing. `Iso9141Client.connect` and `Kwp2000Client._slow_connect`
+      are each a single call into the shared loop, which also absorbed the
+      `supports_slow_init` refusal both were doing themselves.
+- [x] Gave `PidDatabase` / `KwpLocalTable` a `_SensorTable` base for the
+      load/lookup half (`data_file` + `load_default`/`load_file`, `__len__`,
+      `__contains__`, `get`, `ids`). Each subclass keeps its own `from_dict`
+      (the two files have different shapes), its own id vocabulary
+      (`pids()`/`channels()`), and its own decode surface.
 - [x] Delete `app._fmt_value` in favour of a shared `pids.format_value()`
       (`SensorReading.formatted()` delegates to it) — the live table's running
       min/max are derived numbers, not readings, so they need the plain helper.
+- [x] Covered by `tests/test_slow_init.py` (8 tests driving *both* clients
+      through the shared loop: one config section, garbled-first-init recovery,
+      an exactly-spent retry budget, and the up-front capability refusal), plus
+      a parametrized "all four ECU commands share one failure path" in
+      `tests/test_cli.py` and two `_SensorTable` tests in `tests/test_pids.py`.
+
+Two behaviours changed slightly, both fixes:
+
+- `init_retries=0` now means "don't *retry*", one attempt — the iso9141 loop
+  read it as "don't try" and failed with a bare `5-baud init failed: None`.
+  (kwp2000's loop already had the `max(1, …)`.)
+- A transport that can't slow-init is refused by the shared loop *before* the
+  retry budget, so the message stays unwrapped rather than arriving as
+  `5-baud init failed: transport does not support …` after N settle waits.
+
+The retry loop is now also the single place §7's injectable sleeper goes.
 
 ## 6. The live-data seam is the weakest part of the design
 
@@ -275,7 +307,8 @@ It steers every future session here, so its errors compound.
       `-v`. The CLI is now subcommands: `tui|ports|faults|info|sensors|clear|
       version|help` with `--debug` (`cli.py:36-78`). `README.md` is correct;
       `CLAUDE.md` is not.
-- [ ] "88 tests, ~21s" → 163 tests, ~53 s.
+- [x] "88 tests, ~21s" → 182 tests, ~56 s (fixed with §5, which moved the
+      count; the other three bullets here are untouched).
 - [ ] "There is **no PyPI publish** — install is from the release wheel URL" —
       but `release.yml:109-128` has a Trusted-Publishing PyPI job (commit
       f3e3797).

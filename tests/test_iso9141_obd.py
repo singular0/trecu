@@ -1,7 +1,7 @@
 import pytest
 
 from trecu.protocol.iso9141 import Iso9141Client, Iso9141Config
-from trecu.protocol.kwp2000 import ProtocolError
+from trecu.protocol.kwp2000 import ProtocolError, SlowInitConfig
 from trecu.service import DiagnosticService
 from trecu.transport.mock_obd import MockObdTransport
 
@@ -128,7 +128,8 @@ def test_slow_init_rejects_incomplete_handshake():
     """A missing inverted-address reply must fail connect (and drive a retry),
     not be accepted as a live session."""
     t = NoInvAddr()
-    client = Iso9141Client(t, Iso9141Config(init_retries=2, retry_wait=0.0))
+    cfg = Iso9141Config(slow_init=SlowInitConfig(init_retries=2, retry_wait=0.0))
+    client = Iso9141Client(t, cfg)
     t.open()
     with pytest.raises(ProtocolError):
         client.connect()

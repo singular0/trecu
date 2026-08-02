@@ -24,7 +24,7 @@ import json
 import operator
 from dataclasses import dataclass, field
 from importlib import resources
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, ClassVar, Dict, Iterable, List, Optional, Type, TypeVar
 
 # Data bytes are exposed to a formula as A, B, C, D (big-endian order).
 _BYTE_VARS = ("A", "B", "C", "D")
@@ -39,6 +39,8 @@ _BIN_OPS = {
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 Env = Dict[str, int]
+
+TableT = TypeVar("TableT", bound="_SensorTable")
 
 
 def _load_data_json(name: str) -> dict:
@@ -159,7 +161,53 @@ class SensorReading:
         return format_value(self.value)
 
 
-class KwpLocalTable:
+class _SensorTable:
+    """The load/lookup half both live-data tables share.
+
+    :class:`PidDatabase` and :class:`KwpLocalTable` decode *entirely*
+    differently — one Mode 01 response per PID vs. one packed frame split by
+    byte offset — but underneath both are the same thing: an
+    ``{int id -> PidDef}`` map loaded from a bundled ``trecu/data/*.json``.
+    That half lives here. A subclass names its ``data_file`` and owns
+    ``from_dict`` (the two files have different shapes) plus its own decode
+    surface; the domain vocabulary for the ids stays with the subclass too
+    (``pids()`` / ``channels()``), since a standardized SAE PID and a Keihin
+    channel index are not the same kind of number.
+    """
+
+    #: Bundled table under ``trecu/data/`` that :meth:`load_default` reads.
+    data_file: ClassVar[str] = ""
+
+    def __init__(self, defs: Optional[Dict[int, PidDef]] = None):
+        self._defs: Dict[int, PidDef] = dict(defs or {})
+
+    @classmethod
+    def load_default(cls: Type[TableT]) -> TableT:
+        return cls.from_dict(_load_data_json(cls.data_file))
+
+    @classmethod
+    def load_file(cls: Type[TableT], path: str) -> TableT:
+        with open(path, "r", encoding="utf-8") as fh:
+            return cls.from_dict(json.load(fh))
+
+    @classmethod
+    def from_dict(cls: Type[TableT], data: dict) -> TableT:
+        raise NotImplementedError
+
+    def __len__(self) -> int:
+        return len(self._defs)
+
+    def __contains__(self, key: int) -> bool:
+        return key in self._defs
+
+    def get(self, key: int) -> Optional[PidDef]:
+        return self._defs.get(key)
+
+    def ids(self) -> List[int]:
+        return sorted(self._defs)
+
+
+class KwpLocalTable(_SensorTable):
     """Channel table for the packed Keihin live-data frame (``kwp_local``).
 
     Every Triumph Keihin sensor is read with a single
@@ -172,37 +220,25 @@ class KwpLocalTable:
     response (roadmap F4) — fixing them is a data-only edit to that file.
     """
 
-    def __init__(self, lid: int, defs: Dict[int, PidDef]):
+    data_file: ClassVar[str] = "keihin_sensors.json"
+
+    def __init__(self, lid: int, defs: Optional[Dict[int, PidDef]] = None):
+        super().__init__(defs)
         self.lid = lid
-        self._defs = defs
 
     @classmethod
-    def load_default(cls) -> "KwpLocalTable":
-        return cls.from_dict(_load_data_json("keihin_sensors.json"))
-
-    @classmethod
-    def load_file(cls, path: str) -> "KwpLocalTable":
-        with open(path, "r", encoding="utf-8") as fh:
-            return cls.from_dict(json.load(fh))
-
-    @classmethod
-    def from_dict(cls, section: dict) -> "KwpLocalTable":
+    def from_dict(cls, data: dict) -> "KwpLocalTable":
         # Channel keys are *decimal* Keihin channel indices (0..98, gappy) —
         # unlike mode01's hex PID keys.
         defs = {
             int(key): PidDef.from_entry(int(key), entry)
-            for key, entry in section.get("channels", {}).items()
+            for key, entry in data.get("channels", {}).items()
         }
-        return cls(int(section.get("lid", "80"), 16), defs)
-
-    def __len__(self) -> int:
-        return len(self._defs)
-
-    def __contains__(self, idx: int) -> bool:
-        return idx in self._defs
+        return cls(int(data.get("lid", "80"), 16), defs)
 
     def channels(self) -> List[int]:
-        return sorted(self._defs)
+        """Channel indices present in the table, ascending."""
+        return self.ids()
 
     def decode_frame(
         self, data: bytes, channels: Optional[Iterable[int]] = None
@@ -215,7 +251,7 @@ class KwpLocalTable:
         """
         out: List[SensorReading] = []
         for idx in self.channels() if channels is None else channels:
-            d = self._defs.get(idx)
+            d = self.get(idx)
             if d is None:
                 continue
             chunk = data[d.frame_offset : d.frame_offset + d.num_bytes]
@@ -236,7 +272,7 @@ class KwpLocalTable:
         return out
 
 
-class PidDatabase:
+class PidDatabase(_SensorTable):
     """Lookup table mapping PID numbers to :class:`PidDef` decoders.
 
     Backed by ``trecu/data/obd_sensors.json`` — the standardized SAE J1979 PIDs
@@ -245,17 +281,7 @@ class PidDatabase:
     concern, loaded from their own file into :class:`KwpLocalTable`.
     """
 
-    def __init__(self, defs: Optional[Dict[int, PidDef]] = None):
-        self._defs: Dict[int, PidDef] = defs or {}
-
-    @classmethod
-    def load_default(cls) -> "PidDatabase":
-        return cls.from_dict(_load_data_json("obd_sensors.json"))
-
-    @classmethod
-    def load_file(cls, path: str) -> "PidDatabase":
-        with open(path, "r", encoding="utf-8") as fh:
-            return cls.from_dict(json.load(fh))
+    data_file: ClassVar[str] = "obd_sensors.json"
 
     @classmethod
     def from_dict(cls, data: dict) -> "PidDatabase":
@@ -266,20 +292,12 @@ class PidDatabase:
             defs[pid] = PidDef.from_entry(pid, entry)
         return cls(defs)
 
-    def __len__(self) -> int:
-        return len(self._defs)
-
-    def __contains__(self, pid: int) -> bool:
-        return pid in self._defs
-
-    def get(self, pid: int) -> Optional[PidDef]:
-        return self._defs.get(pid)
-
     def pids(self) -> List[int]:
-        return sorted(self._defs)
+        """PID numbers present in the table, ascending."""
+        return self.ids()
 
     def decode(self, pid: int, data: bytes) -> SensorReading:
-        d = self._defs.get(pid)
+        d = self.get(pid)
         if d is None:
             raise KeyError(f"unknown PID 0x{pid:02X}")
         value = d.decode(data)

@@ -9,12 +9,13 @@ import asyncio
 import threading
 
 from trecu.protocol.iso9141 import Iso9141Config
+from trecu.protocol.kwp2000 import SlowInitConfig
 from trecu.transport.base import TransportError
 from trecu.transport.mock_obd import MockObdTransport
 from trecu.tui.session import ConnectOutcome, SessionController
 
 # One-shot init so a failing connect gives up immediately (no retry sleeps).
-_FAIL_FAST = Iso9141Config(init_retries=1, retry_wait=0.0)
+_FAIL_FAST = Iso9141Config(slow_init=SlowInitConfig(init_retries=1, retry_wait=0.0))
 
 
 class CountingObdTransport(MockObdTransport):

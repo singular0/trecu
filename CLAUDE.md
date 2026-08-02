@@ -23,7 +23,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (88 tests, ~21s, no hardware)
+./.venv/bin/python -m pytest              # full suite (182 tests, ~56s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
 ./.venv/bin/trecu --mock --read           # headless read + print + exit
@@ -98,12 +98,18 @@ service so it pokes the link with a cheap read-only Mode 01 PID 00.
 `read_identification()` is best-effort (OBD Mode 09 / KWP ReadEcuIdentification
 0x1A) — a missing reply yields empty fields, not an error. `iso9141.py` imports
 the *shared* types (`ConnectionInfo`, `EcuInfo`, `Logger`, `ProtocolError`,
-`decode_identification_ascii`) **and shared service logic**
-(`slow_init_handshake` — the validated 5-baud handshake both init paths use —
-and `parse_obd_dtc_pairs` + `STATUS_CONFIRMED`/`STATUS_PENDING` for OBD Mode
-03/07 responses) *from* `kwp2000.py` — so kwp2000 is effectively the home of
+`decode_identification_ascii`) **and shared service logic** — the whole 5-baud
+slow init (`slow_init_handshake`, the validated one-shot handshake; the
+`slow_init_with_retries` loop **both clients' `connect()` calls**, which owns
+the retry/settle policy and the transport-capability refusal; and
+`SlowInitConfig`, the timing + retry section `Iso9141Config` and
+`Kwp2000Config` each *compose* rather than duplicate) plus `parse_obd_dtc_pairs`
++ `STATUS_CONFIRMED`/`STATUS_PENDING` for OBD Mode
+03/07 responses — *from* `kwp2000.py`, so kwp2000 is effectively the home of
 the common protocol vocabulary even though the two speak entirely different
-wire protocols. Keep any new shared type or shared helper there.
+wire protocols. Keep any new shared type or shared helper there. Only the init
+*address* stays per-protocol (`init_address` 0x33 vs `ecu_address` 0xD5): it is
+a protocol fact, not handshake timing.
 
 **`DiagnosticService` is the only place that knows about protocol selection.**
 `protocol="auto"` (the default) tries `iso9141` → `kwp-slow` → `kwp-fast` in
@@ -218,7 +224,11 @@ community-reverse-engineered 53-channel Keihin table loaded as a **separate**
 `KwpLocalTable` (the service holds it as `self.kwp_local`, alongside `self.pids`):
 channel keys are *decimal* indices from that table, each entry carries
 `frame_offset`/`bytes` locating it inside the one packed `21 80` frame, and
-`decode_frame` splits such a frame into readings.
+`decode_frame` splits such a frame into readings. The two tables decode
+*entirely* differently but load identically, so the `{int id -> PidDef}`
+load/lookup half is a shared `_SensorTable` base — a subclass names its
+`data_file`, owns `from_dict` (the two files have different shapes), and keeps
+its own id vocabulary (`pids()` vs `channels()`) and decode surface.
 **The kwp_local layout and divisors are a DRAFT**:
 names/kind/decimals/offset/fullscale come from that community-sourced data, but the real
 per-channel divisors and frame byte offsets need an F4 hardware capture —
@@ -417,8 +427,9 @@ labelled `K` + raw hex (see the DTC-decoding section) — and looked up in
 (addressing `D5`/`F5`, request headers `81/82 D5 F5`):**
 
 1. **Init.** `kwp-slow`: 5-baud init at the **ECU address `0xD5`** (same
-   waveform + inverted-address validation as iso9141's, via the shared
-   `slow_init_handshake`); the handshake's key bytes *are* the session's — no
+   waveform, inverted-address validation, *and* retry policy as iso9141's, via
+   the shared `slow_init_with_retries` /
+   `slow_init_handshake` / `SlowInitConfig`); the handshake's key bytes *are* the session's — no
    StartCommunication follows. `kwp-fast`: K-line low 25 ms / high 25 ms via
    the UART break → **StartCommunication** (`0x81`) → key bytes.
 2. **StartDiagnosticSession** `10 02`, then **AccessTimingParameter**

@@ -14,6 +14,7 @@ import time
 from textual.widgets import Header
 
 from trecu.protocol.iso9141 import Iso9141Config
+from trecu.protocol.kwp2000 import SlowInitConfig
 from trecu.tui.app import TrecuApp
 from trecu.tui.screens import ConnectErrorScreen, ConnectingScreen
 from trecu.tui.port_select import PortSelectScreen
@@ -75,7 +76,7 @@ class FailingObdTransport(MockObdTransport):
 
 
 # One-shot init so the failing connect gives up immediately (no retry sleeps).
-_FAIL_FAST = Iso9141Config(init_retries=1, retry_wait=0.0)
+_FAIL_FAST = Iso9141Config(slow_init=SlowInitConfig(init_retries=1, retry_wait=0.0))
 
 
 def test_connecting_modal_shown_then_dismissed_on_success():

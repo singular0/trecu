@@ -24,9 +24,10 @@ from .kwp2000 import (
     ConnectionInfo,
     EcuInfo,
     ProtocolError,
+    SlowInitConfig,
     decode_identification_ascii,
     parse_obd_dtc_pairs,
-    slow_init_handshake,
+    slow_init_with_retries,
 )
 
 # OBD-II (SAE J1979) service/mode identifiers we use.
@@ -56,15 +57,13 @@ class Iso9141Config:
     init_address: int = 0x33               # 5-baud init address
     header: Tuple[int, int, int] = (0x68, 0x6A, 0xF1)  # OBD physical request header
     baudrate: int = 10400
-    w4: float = 0.030                      # gap before sending inverted key byte
     p2_timeout: float = 0.8                # max wait for a response
     pending_timeout: float = 0.3           # shorter wait for optional Mode 07
     quiet_gap: float = 0.05                # end-of-message idle gap
-    sync_timeout: float = 0.6              # wait for the 0x55 sync after init
-    byte_timeout: float = 0.4              # wait for a single handshake byte
     request_gap: float = 0.06              # min idle between requests (P3)
-    init_retries: int = 4                  # slow-init can need a few tries
-    retry_wait: float = 2.0                # settle time between init attempts
+    # 5-baud handshake timing + retry policy; the same section Kwp2000Config
+    # carries, because it is the same handshake (see SlowInitConfig).
+    slow_init: SlowInitConfig = field(default_factory=SlowInitConfig)
     id_timeout: float = 0.5                # per-PID wait for Mode 09 (often unsupported)
     live_timeout: float = 0.4              # per-PID wait when polling Mode 01 live data
     dtc_retries: int = 3                   # Mode 03 answers intermittently; retry
@@ -112,40 +111,21 @@ class Iso9141Client:
         return bytes(buf)
 
     # -- init / connect ------------------------------------------------------
-    def _slow_init(self) -> bytes:
-        """One 5-baud init attempt via the shared handshake (see kwp2000.py).
+    def connect(self) -> ConnectionInfo:
+        """5-baud init at ``config.init_address``; the key bytes open the session.
 
-        The handshake validation — requiring the ECU's inverted-address close,
-        so a garbled init drives a retry instead of a half-open link — lives in
-        :func:`slow_init_handshake`, shared with the KWP slow-init path.
+        Both the handshake and the retry-with-settle loop around it are shared
+        with the KWP slow-init path (:func:`slow_init_with_retries`, see
+        ``kwp2000.py``), including the validation that rejects a garbled init
+        rather than proceeding on a half-open link.
         """
-        cfg = self.config
-        return slow_init_handshake(
+        key = slow_init_with_retries(
             self.transport,
-            cfg.init_address,
-            w4=cfg.w4,
-            sync_timeout=cfg.sync_timeout,
-            byte_timeout=cfg.byte_timeout,
+            self.config.init_address,
+            self.config.slow_init,
             log=self._log,
         )
-
-    def connect(self) -> ConnectionInfo:
-        if not self.transport.supports_slow_init:
-            raise ProtocolError("transport does not support 5-baud slow init")
-        last: Optional[Exception] = None
-        for attempt in range(self.config.init_retries):
-            if attempt > 0:
-                self._log.debug(
-                    f"slow-init retry {attempt} (settle {self.config.retry_wait}s)"
-                )
-                time.sleep(self.config.retry_wait)
-            try:
-                key = self._slow_init()
-                return ConnectionInfo(key_bytes=key, session_started=True)
-            except (ProtocolError, TransportError) as exc:
-                last = exc
-                self._log.debug(f"slow-init attempt {attempt + 1} failed: {exc}")
-        raise ProtocolError(f"5-baud init failed: {last}")
+        return ConnectionInfo(key_bytes=key, session_started=True)
 
     def stop_communication(self) -> None:
         # ISO 9141 has no explicit stop; the session just times out.

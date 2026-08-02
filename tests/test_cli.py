@@ -85,6 +85,27 @@ def test_sensors_command_omits_table_title(capsys) -> None:
     assert "Unit" in output
 
 
+def test_clear_command_confirms_on_stdout(capsys) -> None:
+    assert main(["clear", "--mock", "--protocol", "iso9141", "-y"]) == 0
+    assert "Fault codes cleared." in capsys.readouterr().out
+
+
+# -- the shared service wrapper ------------------------------------------------
+@pytest.mark.parametrize("command", ("faults", "info", "sensors", "clear"))
+def test_ecu_commands_share_one_failure_path(command: str, capsys) -> None:
+    """All four ECU subcommands run through ``_with_service``, so an
+    unreachable cable is exit 2 + ``error:`` on stderr for every one of them —
+    no command can drift onto its own error handling."""
+    argv = [command, "--port", "/dev/nonexistent-trecu"]
+    if command == "clear":
+        argv.append("-y")  # don't block on the confirmation prompt
+
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: could not open /dev/nonexistent-trecu")
+    assert captured.out == ""  # nothing printed when the operation never ran
+
+
 def test_ports_command_shows_table(monkeypatch, capsys) -> None:
     from trecu.transport import serial_kline
 

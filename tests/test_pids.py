@@ -120,3 +120,32 @@ def test_kwp_local_decode_frame_drops_channels_beyond_short_frame():
     table = KwpLocalTable.load_default()
     readings = table.decode_frame(bytes(10))   # only the first 5 slots present
     assert {r.pid for r in readings} == {0, 1, 2, 3, 4}
+
+
+# -- the load/lookup half both tables share -----------------------------------
+def test_both_tables_share_one_load_and_lookup_surface():
+    """The two tables decode differently but load identically; each names its
+    own bundled file and its own id vocabulary over the shared machinery."""
+    obd, keihin = PidDatabase.load_default(), KwpLocalTable.load_default()
+    assert (PidDatabase.data_file, KwpLocalTable.data_file) == (
+        "obd_sensors.json",
+        "keihin_sensors.json",
+    )
+    for table, ids in ((obd, obd.pids()), (keihin, keihin.channels())):
+        assert ids == sorted(ids) and len(ids) == len(table)
+        assert all(i in table for i in ids)
+        assert table.get(ids[0]) is not None
+        assert table.get(0xDEAD) is None
+
+
+def test_load_file_reads_either_table_shape(tmp_path):
+    obd = tmp_path / "obd.json"
+    obd.write_text('{"0C": {"name": "RPM", "bytes": 2, "formula": "(A*256+B)/4"}}')
+    keihin = tmp_path / "keihin.json"
+    keihin.write_text(
+        '{"lid": "80", "channels": {"0": {"name": "RPM", "bytes": 2, '
+        '"formula": "A*256+B", "frame_offset": 0}}}'
+    )
+    assert PidDatabase.load_file(str(obd)).pids() == [0x0C]
+    table = KwpLocalTable.load_file(str(keihin))
+    assert table.lid == 0x80 and table.channels() == [0]

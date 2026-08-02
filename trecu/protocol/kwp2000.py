@@ -11,8 +11,9 @@ still vary by model/year and ECU supplier (Keihin vs Sagem), so they live in
 This module is also the home of the *shared* protocol vocabulary
 (:class:`EcuClient`, :class:`ConnectionInfo`, :class:`EcuInfo`,
 :class:`ProtocolError`, ...) and of the service logic both clients share: the
-5-baud slow-init handshake (:func:`slow_init_handshake`) and OBD DTC pair
-parsing (:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them from here.
+5-baud slow init (:class:`SlowInitConfig`, :func:`slow_init_handshake`, and the
+:func:`slow_init_with_retries` loop both clients connect through) and OBD DTC
+pair parsing (:func:`parse_obd_dtc_pairs`) — ``iso9141.py`` imports them here.
 """
 
 from __future__ import annotations
@@ -130,13 +131,30 @@ def parse_obd_dtc_pairs(body: bytes, status: int) -> List[Tuple[int, int, int]]:
     return out
 
 
+@dataclass
+class SlowInitConfig:
+    """Timing and retry policy for the 5-baud slow init.
+
+    One concern, one place: the ISO 9141-2 init at ``0x33`` and the Keihin KWP
+    init at the ECU address ``0xD5`` run the *identical* waveform under the
+    identical retry discipline, so :class:`~trecu.protocol.iso9141.Iso9141Config`
+    and :class:`Kwp2000Config` each carry this as their ``slow_init`` section
+    rather than repeating the five fields. Only the address differs, and that
+    stays in the protocol's own config because it is a protocol fact.
+    """
+
+    w4: float = 0.030            # gap before sending the inverted key byte
+    sync_timeout: float = 0.6    # wait for the 0x55 sync after init
+    byte_timeout: float = 0.4    # wait for a single handshake byte
+    init_retries: int = 4        # slow-init can need a few tries
+    retry_wait: float = 2.0      # settle time between init attempts
+
+
 def slow_init_handshake(
     transport: Transport,
     address: int,
+    config: Optional[SlowInitConfig] = None,
     *,
-    w4: float = 0.030,
-    sync_timeout: float = 0.6,
-    byte_timeout: float = 0.4,
     log: Optional[LoggerLike] = None,
 ) -> bytes:
     """Run the ISO 9141-2 / ISO 14230 5-baud slow-init handshake at ``address``.
@@ -147,7 +165,11 @@ def slow_init_handshake(
     transport's ``five_baud_init``, waits for the ``0x55`` sync + two key
     bytes, answers with the inverted second key byte, and **requires** the
     ECU's inverted-address close. Returns the two key bytes.
+
+    This is *one* attempt; callers want :func:`slow_init_with_retries`.
     """
+    cfg = config or SlowInitConfig()
+    w4, sync_timeout, byte_timeout = cfg.w4, cfg.sync_timeout, cfg.byte_timeout
     if not transport.supports_slow_init:
         raise ProtocolError("transport does not support 5-baud slow init")
 
@@ -203,6 +225,41 @@ def slow_init_handshake(
     return bytes((kb1, kb2))
 
 
+def slow_init_with_retries(
+    transport: Transport,
+    address: int,
+    config: Optional[SlowInitConfig] = None,
+    *,
+    log: Optional[LoggerLike] = None,
+) -> bytes:
+    """Retry :func:`slow_init_handshake` at ``address`` per ``config``.
+
+    The 5-baud init is timing-flaky — on macOS roughly half of first attempts
+    come back garbled (see the hardware notes in ``CLAUDE.md``) — and the
+    handshake deliberately *rejects* a garbled init rather than proceeding on a
+    half-open link. Retrying with a settle gap is therefore part of the init,
+    not a client-specific nicety: both clients wrap the handshake in this exact
+    loop and differ only in which address they init at.
+
+    Raises :class:`ProtocolError` if every attempt fails, naming the last error.
+    """
+    cfg = config or SlowInitConfig()
+    logger = as_logger(log, verbose=True)
+    if not transport.supports_slow_init:
+        raise ProtocolError("transport does not support 5-baud slow init")
+    last: Optional[Exception] = None
+    for attempt in range(max(1, cfg.init_retries)):
+        if attempt > 0:
+            logger.debug(f"slow-init retry {attempt} (settle {cfg.retry_wait}s)")
+            time.sleep(cfg.retry_wait)
+        try:
+            return slow_init_handshake(transport, address, cfg, log=logger)
+        except (ProtocolError, TransportError) as exc:
+            last = exc
+            logger.debug(f"slow-init attempt {attempt + 1} failed: {exc}")
+    raise ProtocolError(f"5-baud init failed: {last}")
+
+
 @dataclass
 class Kwp2000Config:
     # Triumph K-line addressing per community reverse engineering: engine ECU
@@ -240,12 +297,9 @@ class Kwp2000Config:
     max_pending: int = 20
     init_low_ms: int = 25
     init_high_ms: int = 25
-    # 5-baud slow-init handshake timing (init_mode="slow"); mirrors Iso9141Config.
-    w4: float = 0.030                    # gap before sending inverted key byte
-    sync_timeout: float = 0.6            # wait for the 0x55 sync after init
-    byte_timeout: float = 0.4            # wait for a single handshake byte
-    init_retries: int = 4                # slow-init can need a few tries
-    retry_wait: float = 2.0              # settle time between init attempts
+    # 5-baud handshake timing + retry policy (init_mode="slow"); the same
+    # section Iso9141Config carries, because it is the same handshake.
+    slow_init: SlowInitConfig = field(default_factory=SlowInitConfig)
     # ReadEcuIdentification record-local-identifiers (model/ECU-specific; set
     # any to None to skip). Defaults are from the community Triumph identifier
     # list (0xA0, 0xAE, 0x8C); which record carries which field is unconfirmed on
@@ -531,39 +585,19 @@ class Kwp2000Client:
     def _slow_connect(self) -> bytes:
         """5-baud init at the ECU address (the Keihin K-line fallback).
 
-        Runs the shared :func:`slow_init_handshake` under the same
-        retry/validation discipline as the iso9141 path — the flaky-5-baud
+        Runs the shared :func:`slow_init_with_retries` — the flaky-5-baud
         lesson from the real bike applies to any slow init, not just the
         Sagem's. The handshake replaces StartCommunication: its key bytes are
         the session's key bytes.
         """
-        cfg = self.config
-        if not self.transport.supports_slow_init:
-            raise ProtocolError("transport does not support 5-baud slow init")
-        last: Optional[Exception] = None
-        for attempt in range(max(1, cfg.init_retries)):
-            if attempt > 0:
-                self._log.debug(
-                    f"slow-init retry {attempt} (settle {cfg.retry_wait}s)"
-                )
-                time.sleep(cfg.retry_wait)
-            try:
-                key = slow_init_handshake(
-                    self.transport,
-                    cfg.ecu_address,
-                    w4=cfg.w4,
-                    sync_timeout=cfg.sync_timeout,
-                    byte_timeout=cfg.byte_timeout,
-                    log=self._log,
-                )
-                self._log.debug(
-                    f"connected (5-baud), key bytes: {self._hex(key)}"
-                )
-                return key
-            except (ProtocolError, TransportError) as exc:
-                last = exc
-                self._log.debug(f"slow-init attempt {attempt + 1} failed: {exc}")
-        raise ProtocolError(f"5-baud init failed: {last}")
+        key = slow_init_with_retries(
+            self.transport,
+            self.config.ecu_address,
+            self.config.slow_init,
+            log=self._log,
+        )
+        self._log.debug(f"connected (5-baud), key bytes: {self._hex(key)}")
+        return key
 
     def _access_timing_parameter(self) -> None:
         """Tune the KWP P-timing windows (AccessTimingParameter, best-effort).

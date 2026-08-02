@@ -13,13 +13,16 @@ from trecu.protocol.kwp2000 import (
     Kwp2000Client,
     Kwp2000Config,
     ProtocolError,
+    SlowInitConfig,
     parse_obd_dtc_pairs,
 )
 from trecu.service import _AUTO_ORDER, DiagnosticService
 from trecu.transport.mock_kline import MockKLineTransport
 
 # Slow-init failure paths shouldn't drag the suite out.
-_FAST_RETRY = dict(init_retries=2, retry_wait=0.0, sync_timeout=0.05, byte_timeout=0.05)
+_FAST_RETRY = SlowInitConfig(
+    init_retries=2, retry_wait=0.0, sync_timeout=0.05, byte_timeout=0.05
+)
 
 
 # -- Triumph-correct defaults (community reference) ---------------------------
@@ -121,7 +124,7 @@ def test_kwp_slow_connect_via_5_baud_handshake():
 def test_kwp_slow_refuses_transport_without_slow_init():
     t = MockKLineTransport()               # fast-init only
     t.open()
-    client = Kwp2000Client(t, Kwp2000Config(init_mode="slow", **_FAST_RETRY))
+    client = Kwp2000Client(t, Kwp2000Config(init_mode="slow", slow_init=_FAST_RETRY))
     with pytest.raises(ProtocolError):
         client.connect()
     t.close()
@@ -142,7 +145,7 @@ def test_kwp_slow_rejects_bad_inverted_address():
 
     t = BadInvAddr(supports_slow_init=True)
     t.open()
-    client = Kwp2000Client(t, Kwp2000Config(init_mode="slow", **_FAST_RETRY))
+    client = Kwp2000Client(t, Kwp2000Config(init_mode="slow", slow_init=_FAST_RETRY))
     with pytest.raises(ProtocolError):
         client.connect()
     t.close()

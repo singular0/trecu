@@ -11,7 +11,7 @@ import pytest
 
 from trecu.cli import _build_parser, _make_config, _make_transport, main
 from trecu.protocol.iso9141 import Iso9141Client, Iso9141Config
-from trecu.protocol.kwp2000 import Kwp2000Client, Kwp2000Config
+from trecu.protocol.kwp2000 import Kwp2000Client, Kwp2000Config, SlowInitConfig
 from trecu.service import DiagnosticService, EcuConfig, as_ecu_config
 from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
@@ -19,6 +19,10 @@ from trecu.transport.mock_obd import MockObdTransport
 
 def _config(*argv: str) -> EcuConfig:
     return _make_config(_build_parser().parse_args(list(argv)))
+
+
+# Keep a doomed slow-init candidate from burning its retry budget mid-sweep.
+_ONE_TRY = SlowInitConfig(init_retries=1, retry_wait=0.0)
 
 
 # -- CLI: flags fill both sections regardless of --protocol -------------------
@@ -117,8 +121,7 @@ def test_auto_sweep_connects_at_an_overridden_ecu_address() -> None:
     # mock accepts at any address) proves the override survived the sweep.
     transport = MockKLineTransport(ecu_address=0xD6, supports_slow_init=True)
     cfg = EcuConfig(
-        # Keep the doomed iso9141 candidate from burning its retry budget.
-        iso9141=Iso9141Config(init_retries=1, retry_wait=0.0),
+        iso9141=Iso9141Config(slow_init=_ONE_TRY),
         kwp2000=Kwp2000Config(ecu_address=0xD6),
     )
     with DiagnosticService(transport, cfg, protocol="auto") as svc:
@@ -129,9 +132,9 @@ def test_auto_sweep_connects_at_an_overridden_ecu_address() -> None:
 def test_auto_sweep_without_the_override_never_reaches_kwp_slow() -> None:
     transport = MockKLineTransport(ecu_address=0xD6, supports_slow_init=True)
     cfg = EcuConfig(
-        iso9141=Iso9141Config(init_retries=1, retry_wait=0.0),
+        iso9141=Iso9141Config(slow_init=_ONE_TRY),
         # Left at the default 0xD5, where this ECU no longer answers.
-        kwp2000=Kwp2000Config(init_retries=1, retry_wait=0.0),
+        kwp2000=Kwp2000Config(slow_init=_ONE_TRY),
     )
     with DiagnosticService(transport, cfg, protocol="auto") as svc:
         svc.read_faults()

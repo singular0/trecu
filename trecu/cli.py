@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import replace
-from typing import List, Optional
+from typing import Callable, List, Optional, TypeVar
 
 from . import __version__
 from .protocol.dtc import DtcDatabase
@@ -20,6 +20,8 @@ from .service import (
     EcuConfig,
 )
 from .transport.base import Transport, TransportError
+
+T = TypeVar("T")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -183,6 +185,43 @@ def _cmd_list_ports() -> int:
     return 0
 
 
+def _stderr(message: str) -> None:
+    """Protocol logger sink: diagnostics to stderr, results to stdout."""
+    print(message, file=sys.stderr)
+
+
+def _with_service(
+    args: argparse.Namespace,
+    operation: Callable[[DiagnosticService], T],
+    show: Callable[[T], None],
+) -> int:
+    """Run one ECU ``operation`` for ``args`` and print it with ``show``.
+
+    The four ECU subcommands differ only in those two callables; everything
+    around them — the config, the transport built from that same config, the
+    one-shot ``with service:`` lifecycle, and mapping a transport/protocol
+    failure onto exit code 2 — is identical, and is here so it can only drift
+    in one place. ``show`` runs after the session closes: printing is not an
+    ECU operation, and a formatting bug should not read as a connection error.
+    """
+    config = _make_config(args)
+    service = DiagnosticService(
+        _make_transport(args, config),
+        config,
+        logger=_stderr,
+        protocol=args.protocol,
+        verbose=args.debug,
+    )
+    try:
+        with service:
+            result = operation(service)
+    except (TransportError, ProtocolError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    show(result)
+    return 0
+
+
 def _print_dtcs(result) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -201,51 +240,20 @@ def _print_dtcs(result) -> None:
     console.print(table)
 
 
-def _cmd_read(args: argparse.Namespace) -> int:
-    logger = lambda m: print(m, file=sys.stderr)
-    config = _make_config(args)
-    service = DiagnosticService(
-        _make_transport(args, config), config, logger=logger,
-        protocol=args.protocol, verbose=args.debug
-    )
-    try:
-        with service:
-            result = service.read_faults()
-    except (TransportError, ProtocolError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    _print_dtcs(result)
-    return 0
-
-
-def _cmd_info(args: argparse.Namespace) -> int:
+def _print_info(info) -> None:
     from rich.console import Console
     from rich.table import Table
 
-    logger = lambda m: print(m, file=sys.stderr)
-    config = _make_config(args)
-    service = DiagnosticService(
-        _make_transport(args, config), config, logger=logger,
-        protocol=args.protocol, verbose=args.debug
-    )
-    try:
-        with service:
-            info = service.read_identification()
-    except (TransportError, ProtocolError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
     console = Console()
-    if info and not info.is_empty:
-        table = Table()
-        table.add_column("Field")
-        table.add_column("Value", style="cyan")
-        for label, value in info.as_rows():
-            table.add_row(label, value)
-        console.print(table)
-    else:
+    if not info or info.is_empty:
         console.print("[yellow]No ECU identification reported.[/yellow]")
-    return 0
+        return
+    table = Table()
+    table.add_column("Field")
+    table.add_column("Value", style="cyan")
+    for label, value in info.as_rows():
+        table.add_row(label, value)
+    console.print(table)
 
 
 def _print_live(readings) -> None:
@@ -266,21 +274,20 @@ def _print_live(readings) -> None:
     console.print(table)
 
 
+def _print_cleared(_: None) -> None:
+    print("Fault codes cleared.")
+
+
+def _cmd_read(args: argparse.Namespace) -> int:
+    return _with_service(args, DiagnosticService.read_faults, _print_dtcs)
+
+
+def _cmd_info(args: argparse.Namespace) -> int:
+    return _with_service(args, DiagnosticService.read_identification, _print_info)
+
+
 def _cmd_live(args: argparse.Namespace) -> int:
-    logger = lambda m: print(m, file=sys.stderr)
-    config = _make_config(args)
-    service = DiagnosticService(
-        _make_transport(args, config), config, logger=logger,
-        protocol=args.protocol, verbose=args.debug
-    )
-    try:
-        with service:
-            readings = service.read_live()
-    except (TransportError, ProtocolError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    _print_live(readings)
-    return 0
+    return _with_service(args, DiagnosticService.read_live, _print_live)
 
 
 def _cmd_clear(args: argparse.Namespace) -> int:
@@ -289,20 +296,7 @@ def _cmd_clear(args: argparse.Namespace) -> int:
         if reply not in ("y", "yes"):
             print("Aborted.")
             return 1
-    logger = lambda m: print(m, file=sys.stderr)
-    config = _make_config(args)
-    service = DiagnosticService(
-        _make_transport(args, config), config, logger=logger,
-        protocol=args.protocol, verbose=args.debug
-    )
-    try:
-        with service:
-            service.clear_faults()
-    except (TransportError, ProtocolError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print("Fault codes cleared.")
-    return 0
+    return _with_service(args, DiagnosticService.clear_faults, _print_cleared)
 
 
 def _cmd_tui(args: argparse.Namespace) -> int:
