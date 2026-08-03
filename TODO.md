@@ -10,9 +10,9 @@ The four-layer split (CLI/TUI → `DiagnosticService` → protocol clients →
 transport, see `CLAUDE.md`) is sound and is **not** being questioned. What
 follows is where the seams have frayed.
 
-**Two items are open** (§6, §7); the other nine are closed and archived at the
-bottom. Section numbers are stable — closed items keep theirs, so old references
-still resolve.
+**Three items are open** (§6, §7, §11); the other nine are closed and archived
+at the bottom. Section numbers are stable — closed items keep theirs, so old
+references still resolve.
 
 ## What's holding up well — don't "fix" these
 
@@ -30,8 +30,9 @@ still resolve.
 
 # Open
 
-Do **§7 first** — it's minutes of work and protects everything else. **§6** waits
-on the F4 Keihin capture (see below).
+Do **§7 first** — it's minutes of work and protects everything else. Complete
+the safety-critical parts of **§11** before relying on the enhanced Keihin path.
+Revisit **§6** while replacing the provisional live-data model in §11.
 
 ## 6. The live-data seam is the weakest part of the design
 
@@ -54,9 +55,9 @@ Also:
       service then calls `decoder.request_ids(pids)` / `decoder.decode(raw)`.
 - [ ] Pass `kwp_local=` from the TUI like `pids=`.
 
-**Timing:** do this alongside the F4 Keihin `21 80` capture (see `ROADMAP.md`),
-which is what will push hardest on this seam — the capture will tell you what
-the seam actually needs.
+**Timing:** do this alongside §11's sensor-polling validation. Do not design the
+seam around one packed `21 80` response unless a hardware trace proves that
+shape; the known profile polls individual identifiers.
 
 ## 7. No CI outside the release gate
 
@@ -70,6 +71,75 @@ discovered at release time.
       `kwp2000.py:254`). Inject the sleeper into `slow_init_with_retries` — the
       single retry loop since §5 — which cuts the suite to a few seconds *and*
       lets tests assert retry counts.
+
+## 11. Align the 2009 Bonneville 865 Keihin protocol profile
+
+The standard ISO 9141-2/OBD path is proven on the bike: 5-baud init at `0x33`,
+key bytes `08 08`, request/response headers `68 6A F1` / `48 6B D1`, and stored
+DTC reads through Mode `03`. The enhanced KWP path has the correct K-line,
+10,400-baud framing and `D5`/`F5` physical addresses, but its session and service
+defaults are not yet safe to call validated.
+
+### Profile and connection
+
+- [ ] Describe the tested ECU consistently as **Keihin** with two diagnostic
+      endpoints: standards-based ISO 9141-2/OBD at init address `0x33`, and an
+      enhanced KWP profile at init address `0xD5`. Remove the misleading
+      “Sagem-style ECU” wording.
+- [ ] Keep `0xD5` as a model-profile value, not a general KWP default; retain
+      `0x33` as the emissions-OBD default.
+- [ ] Change the Bonneville/legacy-Keihin diagnostic-session default from
+      `10 02` to `10 03`, ideally in a named model profile rather than the
+      protocol-wide `Kwp2000Config` default.
+- [ ] Implement the required `0x27` seed/key authentication behind a
+      profile-owned strategy, or explicitly limit the enhanced path to services
+      proven to work without authentication. Do not report a fully established
+      enhanced session until this stage succeeds.
+- [ ] Do not send `83 03 1E 02 0A 14 00` automatically after a normal diagnostic
+      connection. Scope it to the high-speed/programming transition that needs
+      those timing values.
+- [ ] Make optional session setup truly best-effort on both negative responses
+      and timeouts, or make failure explicitly fatal; the current comments and
+      exception handling disagree.
+- [ ] Describe auto detection precisely. ISO 9141 followed by KWP slow is the
+      important fallback; KWP fast is an extra probe and has not answered on the
+      tested bike.
+
+### Diagnostic services
+
+- [ ] Retain Mode `03` as the default stored-DTC request on both the ISO and KWP
+      paths. Keep `0x18` opt-in and experimental until a real response validates
+      its record count, status bytes, and code encoding.
+- [ ] Change enhanced-path clear-DTC payload from `14 FF 00` to the legacy
+      Keihin all-groups form `14 FF FF FF`. Keep clearing confirmation-gated and
+      require a captured positive response before marking it validated.
+- [ ] Change the legacy Keihin keepalive from `3E 02` to the single-byte `3F`
+      request, then verify response/no-response timing on hardware.
+- [ ] Replace the provisional “one packed `21 80` frame” live-data model with
+      profile-driven polling of individual `0x22` and Mode-`01` identifiers.
+      Treat `21 80` as an identification/probing request unless a trace proves a
+      sensor-frame use for this ECU.
+- [ ] Remove the invented sequential 53 × 2-byte channel layout after the
+      profile-driven decoder exists. Populate offsets and formulas only from
+      captured request/response pairs with simultaneous reference values.
+- [ ] Keep `0xA0`, `0xAE`, and `0x8C` identification records as raw labelled
+      values until hardware responses establish which record is VIN, hardware,
+      software, or calibration data.
+
+### Parser hardening and proof
+
+- [ ] Validate KWP response target/source addresses (`F5`/`D5`) in addition to
+      checksum and positive service ID.
+- [ ] Reject bad ISO 9141 response checksums instead of warning and continuing.
+- [ ] Add multi-frame handling for Mode `09` before claiming VIN/calibration
+      identification support on the standard path.
+- [ ] Record a sanitized hardware trace covering each non-destructive stage:
+      both init paths, `10 03`, authentication, identification, keepalive,
+      Mode `03`, and representative live identifiers. Convert it into replay
+      fixtures and byte-exact contract tests.
+- [ ] Validate clear-DTC separately on a controlled bike/bench setup after the
+      read-only sequence is stable; do not include clearing in routine protocol
+      discovery.
 
 ---
 
