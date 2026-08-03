@@ -21,7 +21,6 @@ from textual.widgets import (
     DataTable,
     Footer,
     Header,
-    RichLog,
     Static,
     TabbedContent,
     TabPane,
@@ -39,6 +38,7 @@ from ..service import (
 )
 from ..transport.base import Transport
 from .live_table import LiveTable
+from .log_view import LogView
 from .port_select import PortSelectScreen
 from .screens import ConfirmScreen, ConnectErrorScreen, ConnectingScreen
 from .session import ConnectOutcome, SessionController, TransportFactory
@@ -209,7 +209,7 @@ class TrecuApp(App):
             with TabPane("Live Data", id="tab-live"):
                 yield LiveTable(id="live")
             with TabPane("Log", id="tab-log"):
-                yield RichLog(id="log", markup=False, wrap=True, highlight=False)
+                yield LogView(id="log", markup=False, wrap=True, highlight=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -276,7 +276,9 @@ class TrecuApp(App):
         else:
             style = ""
         line = Text.assemble((f"{stamp}  ", "dim"), (msg, style))
-        self.query_one("#log", RichLog).write(line)
+        # LogView decides for itself whether to follow this line to the bottom
+        # (it does unless the user has scrolled up) — see tui/log_view.py.
+        self.query_one("#log", LogView).write(line)
 
     def _ecu_logger(self, msg: str) -> None:
         """Visible ECU logger — invoked from the worker thread."""

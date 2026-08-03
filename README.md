@@ -130,7 +130,9 @@ present. Use `--init-address` and `--timeout` to override connection parameters.
 
 When `trecu tui` cannot auto-select a single cable, it opens the port picker.
 Inside the UI, use `r` to read faults, `c` to clear them, `←`/`→` to switch
-tabs, `space` to freeze live data, and `q` to quit.
+tabs, `space` to freeze live data, and `q` to quit. The Log tab follows the
+newest line while it is scrolled to the bottom; scroll up to read back and it
+stays put until you return to the bottom.
 
 ## License
 

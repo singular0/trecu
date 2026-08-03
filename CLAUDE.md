@@ -25,7 +25,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (193 tests, ~70s, no hardware)
+./.venv/bin/python -m pytest              # full suite (197 tests, ~75s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
@@ -357,8 +357,9 @@ capability line — and ECU identity), **Faults** (the DTC `DataTable`, always v
 just shows its column headers and no rows; the "no faults" wording lives on the
 Dashboard's Faults card, not a separate widget swap), **Live Data** (the Phase 3
 streaming table — sensor / value / unit / running min / max / trend
-sparkline), and **Log** (the raw protocol `RichLog`; error lines are red, and the
-app auto-switches here under `--debug` and on error).
+sparkline), and **Log** (the raw protocol log — a `RichLog` subclass that
+follows the tail only while the user is at the bottom; error lines are red, and
+the app auto-switches here under `--debug` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s
@@ -388,7 +389,18 @@ starts (`reset`); rows update **in place** keyed by PID, so a PID the ECU skips
 in one snapshot keeps its last row and the row cursor doesn't jump. Numbers are
 formatted by the shared `pids.format_value` — the same helper behind
 `SensorReading.formatted()`, so a reading and its derived min/max round
-identically. Keep new presentation logic in these modules, not in `app.py`.
+identically. The Log tab's widget is `LogView` (`tui/log_view.py`), a `RichLog`
+subclass that owns **one** rule: `auto_scroll` is *derived* from the scroll
+position (`watch_scroll_y` → `is_vertical_scroll_end`) instead of pinned on.
+Stock `auto_scroll=True` yanked the view back to the newest line on every write,
+so scrolling up to read an earlier frame was undone by the next log line — and
+the protocol logger writes a line per request. Now leaving the bottom stops the
+follow and returning to it resumes, for every scroll path (wheel, keys,
+scrollbar), because they all end in that watcher; a write while the user is
+scrolled up only grows the content, which moves `max_scroll_y` and not
+`scroll_y`, so it can't re-arm the follow. What gets logged and how it's styled
+stays in `app._append_log`. Keep new presentation logic in these modules, not in
+`app.py`.
 
 **The session lives in `SessionController` (`tui/session.py`), not in the app.**
 That module is deliberately **Textual-free**: it owns the
