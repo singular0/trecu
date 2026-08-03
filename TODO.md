@@ -5,9 +5,13 @@ ordered by priority, dependency, and safety risk. A protocol or model-specific
 feature is not considered supported until a sanitized hardware capture has been
 turned into a replay fixture and a byte-exact test.
 
+TrECU's target is now deliberately narrow: reliable, read-oriented diagnostics
+for the tested 2009 Triumph Bonneville 865 Keihin ECU over its confirmed
+ISO 9141-2 / OBD-II endpoint. KWP2000, enhanced manufacturer diagnostics, ABS,
+actuator control, map access, and reflashing are outside the project scope.
+
 Priority key: **P0** correctness/release safety, **P1** validated read-only
-capability, **P2** user-facing diagnostics, **P3** controlled ECU commands,
-**P4** research-heavy flash access, **P5** explicitly optional/highest risk.
+capability, **P2** user-facing diagnostics.
 
 1. **P0 — Add continuous integration and make the mock suite fast.**
 
@@ -25,220 +29,177 @@ capability, **P2** user-facing diagnostics, **P3** controlled ECU commands,
      local mock suite completes in a few seconds rather than spending most of
      its time in configured retry sleeps.
 
-2. **P0 — Introduce an explicit 2009 Bonneville 865 Keihin profile.**
+2. **P0 — Remove the KWP2000 path and make the product explicitly ISO-only.**
 
-   - Model the tested Keihin ECU as two endpoints owned by one named profile:
-     ISO 9141-2/OBD slow init at `0x33`, and enhanced KWP slow init at physical
-     ECU/tester addresses `0xD5`/`0xF5` at 10,400 baud.
-   - Move `0xD5`, `0xF5`, diagnostic session `10 03`, service choices,
-     keepalive choice, identification records, and any programming timing into
-     that profile. Do not leave Bonneville values as protocol-wide KWP
-     defaults; retain `0x33` as the emissions-OBD default.
-   - Stop sending `83 03 1E 02 0A 14 00` during an ordinary diagnostic
-     connection. Make it an opt-in part of the high-speed/programming
-     transition that actually requires those values.
-   - Choose and implement one consistent session policy: optional setup must
-     tolerate both negative responses and timeouts, while required setup must
-     fail the connection. Until SecurityAccess succeeds, report the enhanced
-     connection as limited rather than fully established.
-   - Describe auto detection precisely in CLI help, user docs, code comments,
-     and tests: ISO 9141 first, KWP slow second, and KWP fast only as an extra
-     unvalidated probe. Remove claims that the tested bike is Sagem; keep Sagem
-     references only where they describe a distinct, unvalidated model or
-     address override.
-   - Add byte-exact profile and connection tests so later generic KWP changes
-     cannot silently alter Bonneville traffic.
-   - **Done when:** all tested-bike configuration comes from the named profile,
-     ordinary connection traffic contains no programming-only timing request,
-     and no documentation or UI identifies the tested ECU incorrectly.
+   - Remove `kwp-slow`, `kwp-fast`, and `auto` protocol selection from the
+     service, CLI, TUI, connection progress, configuration, help text, and
+     documentation. Remove `--ecu-address` and `--tester-address`; retain the
+     ISO init-address and timeout overrides.
+   - Delete the KWP client, KWP framing implementation, KWP transport mock,
+     KWP-only tests, `keihin_sensors.json`, the speculative packed `21 80`
+     decoder, `KwpLocalTable`, `live_source`, and `PidDef.frame_offset`.
+   - Move the genuinely shared vocabulary currently housed in `kwp2000.py`
+     (`ProtocolError`, `ConnectionInfo`, `EcuInfo`, slow-init configuration and
+     helpers, and OBD DTC-pair parsing) into a small neutral ISO/common module.
+     Remove the multi-client `EcuClient` abstraction if it no longer provides a
+     useful boundary with only one concrete protocol client.
+   - Collapse `EcuConfig` and `DiagnosticService` to one ISO configuration and
+     one client construction path. Preserve the transport factory, serialized
+     I/O lock, persistent session, and keepalive lifecycle.
+   - Remove the KWP SecurityAccess, enhanced clear-DTC, actuator, map backup,
+     reflash, and throttle-synchronization roadmap promises rather than leaving
+     dead features implied in comments or documentation.
+   - State the supported boundary consistently: engine-ECU ISO 9141-2 / OBD-II
+     diagnostics only; no CAN modules, ABS, manufacturer service functions,
+     tuning, or programming.
+   - **Done when:** no production import, CLI option, data file, mock, or test
+     implements a KWP path, no user-facing claim offers one, and the complete
+     ISO-only suite passes.
 
-3. **P0 — Harden response parsing before adding enhanced services.**
+3. **P0 — Harden ISO 9141 response parsing.**
 
-   - Validate every KWP response's target and source against the configured
-     tester/ECU addresses (`F5`/`D5` for the Bonneville profile), in addition to
-     its checksum and positive service ID. Reject wrong-address frames rather
-     than accepting traffic for another module.
-   - Reject an ISO 9141 response with a bad checksum. Do not warn and continue
-     with data that may decode into a plausible but false value.
+   - Reject bad response checksums instead of warning and decoding possibly
+     corrupt bytes.
+   - Validate the complete response header and configured ECU source address,
+     not just the presence of a leading `0x48`. Reject traffic for another
+     module.
+   - Validate the expected positive-response mode and requested PID before data
+     reaches a decoder. Treat an unrelated but well-formed frame as unrelated,
+     not as the current request's answer.
+   - Handle echoed data, leading line noise, concatenated frames, truncated
+     frames, quiet-gap boundaries, and extra bytes deterministically. Never
+     trim to the first `0x48` and accept the remainder without validating its
+     exact frame boundary.
    - Add bounded multi-frame Mode `09` reassembly for VIN, calibration ID, and
-     ECU name. Define handling for sequence/count fields, duplicate or missing
-     fragments, inter-frame timeouts, and unrelated frames.
-   - Keep KWP records `0xA0`, `0xAE`, and `0x8C` as raw, labelled values until a
-     capture proves which is VIN, hardware, software, or calibration data.
-   - Add negative tests for wrong addresses, bad checksums, truncated frames,
-     incomplete/out-of-order Mode `09` records, and unexpected service IDs.
-   - **Done when:** corrupt, misaddressed, or incomplete traffic cannot surface
-     as an ECU identity, DTC, or sensor reading.
+     ECU name. Define duplicate, missing, and out-of-order fragment handling and
+     an inter-frame timeout; until then, do not claim those fields as supported.
+   - Add negative tests for bad checksums, wrong headers/source addresses,
+     unexpected modes/PIDs, noise, truncation, concatenated frames, and invalid
+     Mode `09` sequences.
+   - **Done when:** corrupt, misaddressed, incomplete, or unrelated traffic
+     cannot surface as an ECU identity, DTC, or sensor reading.
 
-4. **P0 — Correct the Bonneville diagnostic-service defaults.**
+4. **P0 — Add Mode `01` PID auto-detection after connection.**
 
-   - Keep Mode `03` as the stored-DTC request on both ISO and enhanced KWP
-     paths. Keep KWP `0x18` opt-in and experimental until a real response proves
-     its count, status bytes, and code encoding.
-   - Send the legacy Keihin single-byte `3F` keepalive through the profile
-     instead of generic `3E 02`; define whether a response is expected and how
-     a missing response affects session liveness.
-   - Encode the enhanced clear-DTC request as the legacy Keihin all-groups form
-     `14 FF FF FF`, not `14 FF 00`. Preserve the confirmation gate and do not
-     label the enhanced clear path validated before step 8.
-   - Update mocks and byte-exact tests for Mode `03`, experimental `0x18`, `3F`,
-     and the four-byte clear request without weakening the standard ISO path.
-   - **Done when:** safe read-only defaults match the known profile, destructive
-     traffic remains explicitly gated, and every default request has an exact
-     protocol test.
+   - Immediately after the slow-init handshake, request Mode `01` PID `00` and
+     parse its 32-bit support bitmap. Follow PID pages `20`, `40`, `60`, etc.
+     only when the preceding page's continuation bit advertises the next page.
+   - Cache the advertised PID set for the lifetime of the ECU session and
+     expose it through the ISO client and diagnostic service. Clear it on
+     disconnect or reconnect.
+   - Build the live poll plan from the intersection of caller-selected PIDs,
+     advertised PIDs, and locally decodable PIDs. Stop requesting unsupported
+     battery-voltage PID `0x42` on the tested bike.
+   - Keep three states distinct in the service and UI: advertised by the ECU,
+     successfully answered, and understood by TrECU. A supported PID returning
+     `00` or `FF` data is still a response and must not be treated as missing.
+   - Reuse PID `00` as the ISO keepalive without repeatedly rebuilding or
+     silently changing the session's cached capability set.
+   - Show the raw support bitmap and decoded PID list in debug logs, and expose
+     the list in a headless command or ECU-information view.
+   - Add byte-exact mock tests for the bike's observed `41 00 BD 36 91 10`
+     response, multiple capability pages, no continuation page, malformed and
+     missing bitmaps, partial PID replies, and cache reset after reconnect.
+   - **Done when:** every live request is capability-aware, unsupported PIDs add
+     no timeout to a poll, and advertised/answered/decoded states cannot be
+     confused.
 
-5. **P1 — Replace the stringly typed live-data branch with profile-driven decoders.**
+5. **P1 — Capture and replay the complete non-destructive ISO path.**
 
-   - Define a `LiveDecoder` contract per source that owns both request planning
-     and response decoding, for example `request_ids(selection)` and
-     `decode(raw, selection)`. Register decoders by source so adding another
-     source does not add another branch to `DiagnosticService.read_live`.
-   - Let a request plan describe individual `0x22` records and Mode-`01` PIDs,
-     including identifier, expected width, formula, units, bounds, and display
-     metadata. Support partial replies and preserve requested display order.
-   - Treat `21 80` as an identification/probing request unless a real trace
-     proves that it is a packed sensor response for this ECU. Remove the
-     invented sequential 53-by-2-byte layout and move `frame_offset` out of the
-     shared `PidDef` once no evidence-backed decoder needs it.
-   - Ensure `SessionController` passes the same caller-supplied KWP table or
-     decoder registry into each `DiagnosticService`, just as it passes the OBD
-     PID database; do not recompile the bundled table on every TUI connection.
-   - Replace the mock's synthetic packed frame with per-identifier behavior and
-     test mixed request types, unsupported identifiers, short payloads,
-     formula failures, ordering, and decoder injection through the TUI.
-   - **Done when:** the service has no `live_source == ...` decode branch, no
-     generic descriptor carries source-only layout state, and speculative
-     offsets cannot appear as real sensor values.
-
-6. **P1 — Capture and replay the non-destructive Bonneville protocol.**
-
-   - Record a sanitized trace for ISO `0x33` and KWP slow `0xD5` initialization,
-     `10 03`, the `0x27` seed/key exchange, raw identification records,
-     keepalive, Mode `03`, representative Mode-`01`/`0x22` sensor requests, and
-     the `21 80` probe. Record the lack of a KWP-fast response as an observation,
-     not as a supported path.
-   - Capture sensors at key-on/engine-off, cold idle, warm idle, and controlled
-     throttle changes with simultaneous trusted reference values. Derive
-     widths, signedness, scales, offsets, units, and per-cylinder MAP identifiers
-     only from those paired observations.
-   - Verify sustained polling, keepalive coexistence, unsupported-identifier
-     handling, session timeout behavior, and the achievable K-line refresh
-     rate. Do not promise the mock's cadence on hardware.
+   - Record sanitized raw traces for slow init at `0x33`, including a clean
+     `55 08 08` / inverted-address handshake and representative garbled or
+     incomplete attempts observed on macOS.
+   - Capture supported-PID discovery, keepalive, Mode `01` PID `01`, Mode `03`,
+     Mode `07`, Mode `09`, and every advertised live PID the bike answers.
+   - Capture live sensors at key-on/engine-off, cold idle, warm idle, controlled
+     throttle changes, and engine shutdown with simultaneous trusted reference
+     values. Record raw `00`/`FF` sentinel-looking values rather than assigning
+     semantics without evidence.
+   - Measure response latency, sustainable K-line refresh rate, session timeout,
+     keepalive interaction, and recovery after disconnect. Do not promise the
+     mock's cadence on hardware.
    - Convert captures into sanitized replay fixtures and byte-exact contract
-     tests. Add newly observed DTC descriptions or record mappings only when
-     their source and encoding are known.
-   - **Done when:** the full non-destructive sequence can be replayed without
-     hardware and decoded values agree with the reference measurements within
-     documented tolerances.
+     tests. Strip VIN and other identifying data without changing framing,
+     lengths, checksums, or sequencing behavior.
+   - **Done when:** the full ISO read-only sequence replays without hardware and
+     decoded values agree with trusted references within documented tolerances.
 
-7. **P1 — Implement profile-owned KWP SecurityAccess and capability gating.**
+6. **P1 — Make live polling capability-aware, paced, and auditable.**
 
-   - Put the `0x27` seed/key algorithm behind a profile-owned strategy rather
-     than inside the generic KWP client. Support the observed access level,
-     seed request, key response, response-pending flow, retry delay, denial,
-     and lockout behavior.
-   - Validate the implementation against captured seed/key vectors without
-     storing secrets or unsanitized bike data in the repository.
-   - Track authentication separately from transport connection and diagnostic
-     session state. Refuse actuator, map, and programming operations unless the
-     profile declares the capability and the required authentication completed.
-   - Apply programming-only timing parameters only after the authenticated
-     transition that needs them, and restore/close the session safely on error.
-   - **Done when:** a replay proves successful and failed authentication paths,
-     the UI/CLI cannot overstate session capability, and protected services are
-     unreachable without the gate.
+   - Replace the single all-sensors cadence with a serialized poll plan: RPM,
+     TPS, and MAP at the fastest sustainable tier; oxygen/fuel-trim data at a
+     medium tier; temperatures and status at a slow tier.
+   - Derive cadence from measured round-trip latency and the selected sensor
+     count. Display achieved sample age/rate rather than an aspirational timer
+     interval, and never overlap requests on the half-duplex K-line.
+   - Validate every formula and width in `obd_sensors.json` against captured
+     bike data. Add structured decoders for bitfields/enums such as monitor
+     status, fuel-system status, and OBD-standard identity instead of forcing
+     them through numeric formulas.
+   - Carry timestamp, raw bytes, decoded value/unit, response latency, and a
+     quality/state marker with each reading. Distinguish valid zero, saturated
+     raw data, stale data, unsupported, decode failure, timeout, and lost
+     session.
+   - Support partial snapshots without making one optional PID timeout look like
+     a dead connection; confirm liveness with a known reliable request before
+     reconnecting.
+   - **Done when:** live data stays responsive at the selected sensor count,
+     every displayed value is traceable to raw bytes, and absence/failure states
+     are explicit.
 
-8. **P1 — Validate enhanced clear-DTC on a controlled target.**
+7. **P1 — Improve serial discovery and ISO session recovery.**
 
-   - Use a bench ECU or a bike with a known, recoverable stored fault only after
-     the read-only sequence in step 6 is stable. Keep this out of routine
-     protocol discovery.
-   - Capture the confirmation, exact `14 FF FF FF` request, positive/negative
-     response, follow-up Mode `03` read, and behavior after reconnect.
-   - Test refusal, timeout, disconnect, and ambiguous-response paths so the UI
-     never reports success unless a valid acknowledgement and verification read
-     agree.
-   - **Done when:** the sanitized clear cycle is a replay fixture and the
-     enhanced path is labelled validated only for the tested profile.
+   - Deduplicate macOS device aliases that share the same VID, PID, FTDI serial
+     number, USB location, and interface, while preserving genuinely separate
+     multi-interface devices. Prefer and remember one stable usable alias.
+   - Log slow-init attempt number, address, timing outcome, sync/key bytes, and
+     inverted-address validation without making normal output noisy.
+   - Validate transmitted echo exactly and classify missing/mismatched echo
+     separately from a silent ECU response.
+   - Define session-loss criteria using a reliable liveness request, then add a
+     bounded reconnect policy that rebuilds the transport, repeats PID
+     discovery, and resumes polling without racing the old session.
+   - Test alias deduplication, port disappearance, busy/permission failures,
+     garbled first init, retry exhaustion, mid-poll disconnect, reconnect, and
+     cancellation entirely against mocks.
+   - **Done when:** one physical FTDI cable is presented once, transient init
+     failures recover, and a lost session cannot be mistaken for an unsupported
+     sensor.
 
-9. **P2 — Add live-data controls and recording.**
+8. **P2 — Add live-data selection and verifiable recording.**
 
-   - Add a sensor picker driven by the active profile/decoder, with clear
-     unsupported-state feedback and a useful profile-specific default set.
-   - Add CSV recording with monotonic and wall-clock timestamps, sensor IDs,
-     engineering values/units, and enough raw data/profile metadata to audit a
-     decode later. Flush and close cleanly on stop, disconnect, and error.
-   - Add adjustable poll intervals bounded by what the half-duplex K-line and
-     selected sensor count can sustain; display measured refresh rate rather
-     than an aspirational target.
-   - Decide the remaining presentation split, then test it at narrow and wide
-     terminal sizes. The current direction is to retain the dense table and
-     sparklines in Live Data and reserve a small gauge cluster for Dashboard.
-   - **Done when:** a user can choose sensors, record a verifiable session, and
-     change cadence without overlapping ECU traffic or corrupting the output.
+   - Add a sensor picker driven by the session's advertised PID set, showing
+     which PIDs TrECU can decode and which are available as raw data only.
+   - Add CSV recording with monotonic and wall-clock timestamps, PID, raw bytes,
+     decoded value/unit, response latency, and connection/quality state.
+   - Add JSONL protocol recording that preserves request and response frames,
+     session metadata, and tool version for later replay and decoder audits.
+     Sanitize identifying Mode `09` data before fixtures are committed.
+   - Flush and close recordings cleanly on stop, disconnect, error, and app
+     exit. Use a temporary output and publish the final file only after a clean
+     close.
+   - Add adjustable polling tiers bounded by measured K-line capacity, plus a
+     compact raw-data/debug view for investigating unfamiliar advertised PIDs.
+   - **Done when:** a user can select discovered sensors, record a session whose
+     decoded values remain auditable from raw frames, and recover a valid file
+     after routine disconnects.
 
-10. **P2 — Build the throttle-body synchronization view.**
+9. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
 
-    - Start only after step 6 identifies and calibrates the profile's
-      per-cylinder intake-pressure records.
-    - Add a purpose-built view showing each cylinder, spread, units, trend, and
-      a profile-owned balance tolerance. Include freeze/resume behavior and
-      clear guidance for engine temperature and idle preconditions.
-    - Reuse the single serialized live session; entering/leaving the view must
-      retask polling without racing DTC reads, keepalive, or another live view.
-    - Test balance calculations, missing cylinders, outliers, stale data,
-      reconnects, terminal layout, and moving mock values.
-    - **Done when:** replayed/reference pressures produce the expected balance
-      result and the view degrades safely when any required channel is absent.
-
-11. **P3 — Add guarded actuator tests.**
-
-    - Start only after steps 6 and 7 prove the enhanced path and SecurityAccess.
-      Capture whether each actuator uses `0x2F`, `0x31`, or another service, and
-      store model-specific routine IDs and limits in profile data such as
-      `triumph_actuators.json`.
-    - Implement a service boundary for fuel-pump, injector, and later actuator
-      commands; extend the mock with observable actuator state and exact request
-      tests before touching hardware.
-    - Require engine-off and other profile preconditions, an explicit
-      confirmation, hold-to-activate semantics, a strict maximum duration, and
-      automatic stop on release, timeout, disconnect, exception, or app exit.
-    - Prove stop behavior on a bench ECU before a controlled bike test, and
-      never infer success from transmission alone.
-    - **Done when:** every actuator has captured start/stop acknowledgements,
-      enforced safety limits, failure-path tests, and profile-specific support
-      labelling.
-
-12. **P4 — Implement a verified map-backup workflow.**
-
-    - Begin only after authenticated programming access is proven. Capture the
-      ECU's actual read mechanism (`0x23` or `0x35` -> `0x36` -> `0x37`), memory
-      ranges, block sizes, timing, and checksum rules in model-profile data.
-    - Build a dedicated transfer module with bounded reads, progress, retry
-      policy, cancellation, and checksum verification. Write to a temporary
-      file and publish the final backup only after a complete verified transfer.
-    - Add a `dump-map` CLI subcommand that produces a raw, community-compatible
-      `.bin` plus a manifest containing profile, ECU identity, size, hashes,
-      capture time, and tool version.
-    - Compare repeated dumps byte-for-byte and against an independent trusted
-      tool before treating the backup as usable.
-    - **Done when:** replay tests cover interruption and corruption, and multiple
-      controlled dumps are identical and independently verified.
-
-13. **P5 — Make and, only if justified, execute a reflash go/no-go decision.**
-
-    - Decide explicitly whether reflashing belongs in trecu or should remain
-      delegated to mature community tools. A no-go decision should close this
-      item with documented rationale; do not keep a permanently implied
-      promise.
-    - A go decision requires step 12 to be proven, a known-good backup before
-      every write, checksum correction, stable external power, a documented and
-      tested recovery path, and extensive bench testing on expendable hardware.
-    - Only then implement erase plus `0x34` -> `0x36` -> `0x37`, interruption
-      handling, read-back verification, strict profile/identity matching, and
-      confirmations that make the bricking risk unmistakable.
-    - Update the README's scope and safety claims before any release containing
-      write support.
-    - **Done when:** either the no-go decision is recorded, or an independently
-      recoverable bench reflash passes full write/read-back verification and a
-      separate safety review.
+   - Preserve Mode `01` PID `01` as the authority for MIL state and stored-DTC
+     count, with Mode `03` retries reconciled against it and Mode `07` pending
+     codes best-effort. Add replay coverage for inconsistent counts, silence,
+     duplicate codes, and recovery after a transient timeout.
+   - Validate Mode `09` identification only after the bounded multi-frame parser
+     from step 3 works against captured responses; otherwise label it
+     unsupported rather than returning plausible partial ASCII.
+   - Validate ISO Mode `04` clear-DTC separately on a controlled bike or bench
+     target with a known recoverable fault. Preserve the confirmation guard and
+     require a valid acknowledgement followed by reconnect/status verification
+     before reporting success.
+   - Keep clear-DTC out of connection discovery and automated hardware probes.
+     Test refusal, timeout, disconnect, ambiguous acknowledgement, and failed
+     verification paths with replay fixtures first.
+   - **Done when:** reads cannot report a false clean state, identification is
+     complete or explicitly unavailable, and clearing reports success only
+     after verified ECU state agrees.
