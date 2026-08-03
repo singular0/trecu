@@ -25,31 +25,47 @@ Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 ```bash
 ./.venv/bin/python -m pytest              # full suite (181 tests, ~56s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
-./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
-./.venv/bin/trecu --mock --read           # headless read + print + exit
-./.venv/bin/trecu --mock --live           # headless live-sensor snapshot + exit
-./.venv/bin/trecu --list-ports            # find a real cable's /dev/cu.usbserial-*
+./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
+./.venv/bin/trecu faults --mock           # headless read + print + exit
+./.venv/bin/trecu info --mock             # headless ECU identification
+./.venv/bin/trecu sensors --mock          # headless live-sensor snapshot + exit
+./.venv/bin/trecu clear --mock -y         # clear, skipping the confirmation prompt
+./.venv/bin/trecu ports                   # find a real cable's /dev/cu.usbserial-*
 ```
 
+The CLI is a **subcommand** surface (`cli.py:27-86`), not a flag soup: one
+optional positional out of `tui|ports|faults|info|sensors|clear|version|help`,
+defaulting to `tui`. `--port`, `--baud`, and `--mock` are
+`argparse.SUPPRESS`-hidden development hooks — the public surface auto-detects
+the cable.
+
 Tests run **entirely against the in-memory mock ECUs** — never require hardware,
-and any new test must follow suit. Use `-v` on the CLI to dump raw byte traffic
-when debugging a protocol.
+and any new test must follow suit. Use `--debug` on the CLI to dump raw byte
+traffic when debugging a protocol (it also auto-opens the TUI's Log tab).
 
 ## Releasing
 
 The package **version is not stored in `pyproject.toml`** — it's derived from the
 git tag at build time by `hatch-vcs` (`[tool.hatch.version] source = "vcs"`), so
-`trecu.__version__` (and `trecu --version`) read it back from installed metadata
+`trecu.__version__` (and `trecu version`) read it back from installed metadata
 via `importlib.metadata`. To cut a release, push a **semver tag** (`vMAJOR.MINOR.PATCH`,
 optionally `-prerelease`/`+build`): `.github/workflows/release.yml` fires **only**
 on those tags. It first runs the **mock-only test suite as a gate** (a `test` job
 the build `needs`), and only if that passes builds the sdist + wheel (whose version
-therefore equals the tag) and publishes them as assets on a **GitHub Release**
-(created via the `gh` CLI, no third-party action; a `-prerelease` tag is marked
-pre-release). Non-semver tags
-are ignored by the tag filter, and a strict-semver guard step fails anything that
-slips through. There is **no PyPI publish** — install is from the release wheel
-URL (see README).
+therefore equals the tag, re-checked by a "Verify built version matches the tag"
+step). Non-semver tags are ignored by the tag filter, and a strict-semver guard
+step fails anything that slips through.
+
+Two **sibling publish jobs** then fan out from that one build (both `needs:
+build`, so neither rebuilds and both ship identical artifacts):
+
+- **`pypi`** — uploads to PyPI via **Trusted Publishing**
+  (`pypa/gh-action-pypi-publish`, the `pypi` GitHub environment, `id-token:
+  write`), so no long-lived API token is stored. This is the documented install
+  path: `pip install trecu` / `pipx install trecu` (see README).
+- **`release`** — attaches the same sdist + wheel to a **GitHub Release**
+  (created via the `gh` CLI, no third-party action; a `-prerelease` tag is
+  marked pre-release).
 
 ## Architecture
 
@@ -140,8 +156,9 @@ but because a cancelled attempt keeps running inside *its* service's `_io_lock`
 and must not tear down a newer session (see §2 of `TODO.md`).
 
 **Two lifecycle modes.** One-shot (`with service:` → `open`/`close`) still
-connects lazily on the first operation — that's the CLI's `--read`/`--clear`
-path. **Persistent (F1)** is `service.session()` (a context manager) or
+connects lazily on the first operation — that's the path the CLI's
+`faults`/`info`/`sensors`/`clear` subcommands take (all four through
+`cli._with_service`). **Persistent (F1)** is `service.session()` (a context manager) or
 `start_session()`: it connects *up front* and runs a background keepalive
 ticker (`_Keepalive`, a daemon thread) sending `client.keepalive()` every
 `DEFAULT_KEEPALIVE_INTERVAL` (2 s) so the ECU doesn't drop the session while
@@ -246,15 +263,15 @@ grey when disconnected, yellow while connecting, dim green connected, bright
 green during a read/clear, red on error). The **Faults tab itself is the fault
 indicator** — `_mark_faults_tab` toggles a `-has-faults` class (CSS `color:
 $error; text-style: bold`) on the tab so its label turns red whenever the last
-read found stored codes (there is no separate MIL lamp in the spine). The body
-has three
+read found stored codes (there is no separate MIL lamp in the title bar). The
+body has four
 tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
 identity), **Faults** (the DTC `DataTable`, always visible — with no codes it
 just shows its column headers and no rows; the "no faults" wording lives on the
 Dashboard's Faults card, not a separate widget swap), **Live Data** (the Phase 3
 streaming table — sensor / value / unit / running min / max / trend
 sparkline), and **Log** (the raw protocol `RichLog`; error lines are red, and the
-app auto-switches here under `-v` and on error).
+app auto-switches here under `--debug` and on error).
 Footer bindings are *contextual* via `check_action`: `r` Read shows on
 Dashboard/Faults, `c` Clear on Faults only, `space` Freeze on Live Data only;
 `←`/`→` step tabs (app-level `priority=True` bindings, because `TabbedContent`'s

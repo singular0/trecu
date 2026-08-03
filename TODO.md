@@ -27,7 +27,8 @@ follows is where the seams have frayed.
 ## Suggested order
 
 1. **CI on push/PR** (§7) — minutes of work, protects everything else.
-2. **`CLAUDE.md` sync** (§10) — cheap, and every later session reads it first.
+2. ~~**`CLAUDE.md` sync** (§10)~~ — **done**: the CLI section, the release
+   pipeline, and `ROADMAP.md`'s retired spine lamps now match the code.
 3. ~~**`EcuClient` Protocol** (§1)~~ — **done**: the `getattr` layer is gone.
 4. ~~**`--protocol auto` config overrides** (§4)~~ — **done**: the only
    user-visible defect; `EcuConfig` carries both protocol sections through the
@@ -317,21 +318,38 @@ now calls `client._read_status()`, the deliberate exception to "test the public
 surface": the MIL-bit/count parse has no other direct assertion, and `read_dtcs`
 only exercises it incidentally.
 
-## 10. `CLAUDE.md` has drifted from the code
+## 10. `CLAUDE.md` has drifted from the code — **done**
 
 It steers every future session here, so its errors compound.
 
-- [ ] CLI section documents `trecu --mock --read` / `--live` / `--list-ports` /
-      `-v`. The CLI is now subcommands: `tui|ports|faults|info|sensors|clear|
-      version|help` with `--debug` (`cli.py:36-78`). `README.md` is correct;
-      `CLAUDE.md` is not.
+- [x] CLI section documented `trecu --mock --read` / `--live` / `--list-ports` /
+      `-v`. The CLI is subcommands: `tui|ports|faults|info|sensors|clear|
+      version|help` with `--debug` (`cli.py:27-86`). `README.md` was correct;
+      `CLAUDE.md` now names the subcommand shape, the `argparse.SUPPRESS`-hidden
+      dev hooks (`--port`/`--baud`/`--mock`), and every example is a real
+      invocation (all six smoke-run). Three more `-v`/`--read` leftovers went
+      with it: the Log tab's auto-switch trigger, the one-shot lifecycle's
+      "CLI's `--read`/`--clear` path", and `trecu --version` → `trecu version`.
 - [x] "88 tests, ~21s" → 181 tests, ~56 s (fixed with §5, which moved the
-      count; the other three bullets here are untouched).
-- [ ] "There is **no PyPI publish** — install is from the release wheel URL" —
-      but `release.yml:109-128` has a Trusted-Publishing PyPI job (commit
-      f3e3797).
-- [ ] `ROADMAP.md` still describes the spine's `⚡` keepalive lamp and MIL lamp,
-      which the Faults-tab tinting replaced.
+      count; re-verified here: 181 passed in 56.07 s).
+- [x] "There is **no PyPI publish** — install is from the release wheel URL" —
+      `release.yml:109-128` has a Trusted-Publishing PyPI job (commit f3e3797).
+      The Releasing section now describes `pypi` and `release` as **sibling**
+      jobs fanning out from one `build` (so both ship identical artifacts), and
+      names `pip install trecu` as the documented install path.
+- [x] `ROADMAP.md` described the spine's `⚡` keepalive lamp and MIL lamp, which
+      the Faults-tab tinting replaced. Both now read as *dropped, and why* — the
+      MIL indicator moved onto the Faults tab label, and a held session is what
+      the title bar's `connected` state already means — rather than as pending
+      work someone might "finish". The same section's stale neighbours went too:
+      `#spine`/`_SPINE` → the stock `Header` + `_CONNECTION_STATES`, three tabs →
+      four, `streaming N sensors` → `streaming...`, and the three "current"
+      mockups redrawn (tab strips, footer order, DTC columns).
+
+Also corrected while in the same paragraphs, same class of drift: `CLAUDE.md`
+said "the body has **three** tabs" and then listed four; `ROADMAP.md`'s "where
+we are today" still claimed **31** tests and the old `--read`/`--clear`/
+`--list-ports`/`--live` flags in four places.
 
 ## Minor
 

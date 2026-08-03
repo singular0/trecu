@@ -11,7 +11,7 @@ Effort key: **S** ≈ a session, **M** ≈ a few days, **L** ≈ a week+, **XL**
 
 ## Where we are today
 
-Built and tested (31 tests, all against the mock ECUs):
+Built and tested (181 tests, all against the mock ECUs):
 
 - **Two duck-typed protocol clients** — `Iso9141Client` (5-baud slow init + OBD-II
   Modes 01/03/04/07/09) and `Kwp2000Client` (fast-init + KWP2000 services incl.
@@ -20,9 +20,9 @@ Built and tested (31 tests, all against the mock ECUs):
   lifecycle.
 - **DTC decode** per SAE J2012 + JSON description DB (`data/triumph_dtc.json`).
 - **ECU identification** (VIN / calibration / ECU name) surfaced on `ReadResult`,
-  in `--read` output, and in the TUI status bar + log.
-- **CLI** (`--read`, `--clear`, `--list-ports`, `--mock`) and **Textual TUI**
-  (read / clear / port picker).
+  in `trecu info` / `trecu faults` output, and on the TUI's Dashboard + log.
+- **CLI** (`tui|ports|faults|info|sensors|clear|version|help`) and **Textual TUI**
+  (read / clear / live data / port picker).
 - **Persistent session + keepalive** (`DiagnosticService.session()`, a
   `TesterPresent` ticker, half-duplex I/O lock; the TUI owns one long-lived
   session) — the F1 foundation for everything continuous.
@@ -54,13 +54,13 @@ Delivered:
   on the single-wire K-line.
 - **TUI owns one long-lived session** — held by `SessionController`
   (`tui/session.py`), reused across reads/clears/live polls, torn down on error
-  for a clean reconnect and on `on_unmount`. The spine shows a `⚡` keepalive
-  lamp.
+  for a clean reconnect and on `on_unmount`. The title bar's liveness dot reads
+  `connected` for the life of the held session.
 - Covered by `tests/test_session.py` (lifecycle, ticker cadence, lock
   serialization, teardown, both clients' keepalive, TUI session reuse).
 
-The CLI stays one-shot (`--read`/`--clear` use `with service:`, no keepalive);
-the persistent session is the TUI/continuous path.
+The CLI stays one-shot (`trecu faults`/`clear` use `with service:`, no
+keepalive); the persistent session is the TUI/continuous path.
 
 ### F2 — Model-value data files, not constants  · **S, incremental** · unlocks 3–7 · **started**
 `data/triumph_dtc.json` is the pattern: model-specific values live in data, not
@@ -125,8 +125,8 @@ Delivered:
   doesn't implement it just yields empty fields.
 - `EcuInfo` lives in `kwp2000.py` beside `ConnectionInfo` (shared vocabulary);
   surfaced on `ReadResult`, cached per session in `DiagnosticService`.
-- Both mocks serve placeholder identity; shown in `--read` output and the TUI
-  status bar + log. Covered by `tests/test_identification.py`.
+- Both mocks serve placeholder identity; shown by `trecu info` and on the TUI's
+  Dashboard identity card + log. Covered by `tests/test_identification.py`.
 
 **Follow-ups (deferred, not blocking):** real Mode 09 responses on K-line can
 span multiple frames — the current decoder reads a single frame, which is what
@@ -178,7 +178,7 @@ Delivered:
   tab is active and kicks a `@work(group="live")` reader; `space` freezes it.
 - **Mocks** answer live requests with plausible *moving* values from one shared
   generator (`transport/_mock_live.py`).
-- **CLI** `--live` (headless one-shot snapshot). Tests in `test_pids.py` +
+- **CLI** `trecu sensors` (headless one-shot snapshot). Tests in `test_pids.py` +
   `test_live.py` (formula eval, both client paths, service decode/ordering, mock
   movement, TUI poll loop).
 
@@ -333,35 +333,43 @@ visible tab — switching views *retasks the ECU*.
 
 #### The shell
 
-- **Session spine** — a one-row header (`#spine`). Brand (`TrECU`) on the left;
-  right-aligned, a colored liveness dot + state label driven by `_SPINE`
-  (`ready` / `connecting` / `reading` / `clearing` / `connected` / `error`),
-  preceded by a **synthetic MIL lamp** — a red dot shown only when the last read
-  reported stored faults, and (F1) a green **`⚡` keepalive lamp** while a
-  long-lived session is held open. This is deliberately *thinner* than the
-  originally proposed spine: protocol / port / ECU identity live in the
-  Dashboard cards, and there is no poll-rate indicator yet (no poll loop).
-- **`TabbedContent` body** — three tabs: **Dashboard**, **Faults**, **Log**.
-  `←` / `→` move between them, shown in the footer as *Prev tab* / *Next tab*.
-  These are app-level `priority=True` bindings: `TabbedContent` already binds
-  the arrows but with `show=False`, so re-declaring them with priority is what
-  makes them win the binding chain *and* appear in the footer.
+- **Title bar** — Textual's stock one-row `Header` (`show_clock=False`, no
+  icon), rendered by a `format_title` override into one assembled line:
+  `TrECU v0.1.0 — ● connected`. The dot's color and the label come from
+  `_CONNECTION_STATES` (`disconnected` / `connecting` / `reading` / `clearing` /
+  `connected` / `error`, plus `streaming...` / `frozen` while the Live Data poll
+  loop runs). Deliberately *thinner* than the originally proposed spine:
+  protocol / port / ECU identity live in the Dashboard cards.
+  - The two lamps the early drafts put here are **gone**, replaced by cheaper
+    signals. The **MIL lamp** is now the **Faults tab itself** — `_mark_faults_tab`
+    tints its label red (`-has-faults`) when the last read found stored codes, so
+    the fault indicator sits on the thing you'd click. The **`⚡` keepalive lamp**
+    is subsumed by the state label: a held session simply reads `connected`, and
+    the keepalive ticker is an implementation detail with no lamp of its own.
+- **`TabbedContent` body** — four tabs: **Dashboard**, **Faults**, **Live Data**,
+  **Log**. `←` / `→` move between them, shown in the footer as *Prev tab* /
+  *Next tab*. These are app-level `priority=True` bindings: `TabbedContent`
+  already binds the arrows but with `show=False`, so re-declaring them with
+  priority is what makes them win the binding chain *and* appear in the footer.
+  Each switch also focuses that tab's primary control (`_TAB_FOCUS`).
 - **Contextual footer** — `check_action` gates the action bindings per tab:
-  `r` Read appears on Dashboard and Faults; `c` Clear on Faults only; `q` Quit
-  everywhere. On the Log tab only the tab-nav + quit remain.
+  `r` Read appears on Dashboard and Faults; `c` Clear on Faults only; `space`
+  Freeze on Live Data only; `q` Quit everywhere. On the Log tab only the tab-nav
+  + quit remain.
 - **Log is a permanent tab**, not the toggle originally proposed. The app
-  auto-switches to it under `-v` and on any error (plus a `bell()`), and error
-  lines (`[error] …`) render red.
+  auto-switches to it under `--debug` and on any error (plus a `bell()`), and
+  error lines (`[error] …`) render red.
 - **Clear is guarded** by a modal `ConfirmScreen` whose default/focused button
   is *Cancel*; Enter or Esc cancels, avoiding an accidental wipe.
 
 #### Mockups (current)
 
-Dashboard — three summary cards, the landing view:
+Dashboard — three summary cards, the landing view. `Faults` is red because the
+last read found codes; that tint *is* the MIL indicator:
 
 ```
-┌ TrECU ─────────────────────────────────────────────── ● ● connected ┐
-├[ Dashboard ]─ Faults ─ Log ──────────────────────────────────────────┤
+┌───────────────────── TrECU v0.1.0 — ● connected ─────────────────────┐
+├[ Dashboard ]─ Faults ─ Live Data ─ Log ──────────────────────────────┤
 │ ╭ Faults ──────────╮ ╭ Connection ──────╮ ╭ ECU identity ─────────╮  │
 │ │ 1 stored fault    │ │ Mode     Mock    │ │ VIN      SMT…1234     │  │
 │ │ code(s)           │ │ Port     mock ECU│ │ Cal      1234567      │  │
@@ -369,7 +377,7 @@ Dashboard — three summary cards, the landing view:
 │ │ P1108             │ │                  │ │                       │  │
 │ ╰───────────────────╯ ╰──────────────────╯ ╰───────────────────────╯  │
 ├───────────────────────────────────────────────────────────────────────┤
-│ r Read   ← Prev tab   → Next tab   q Quit                             │
+│ ← Prev tab   → Next tab   r Read   q Quit                             │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -377,17 +385,18 @@ Faults — the DTC table, always shown (just column headers and no rows when
 there are no codes; the "no faults" wording lives on the Dashboard's Faults card):
 
 ```
-├─ Dashboard ─[ Faults ]─ Log ─────────────────────────────────────────┤
-│ Code    Status         Subsystem              Description             │
-│ P1108   stored, MIL    Ambient pressure       Sensor circuit …        │
+├─ Dashboard ─[ Faults ]─ Live Data ─ Log ─────────────────────────────┤
+│ Code    Status         Description                                    │
+│ P1108   stored, MIL    Ambient pressure sensor circuit …              │
 ├───────────────────────────────────────────────────────────────────────┤
-│ r Read   c Clear   ← Prev tab   → Next tab   q Quit                   │
+│ ← Prev tab   → Next tab   r Read   c Clear   q Quit                   │
 ```
 
-Log — timestamped protocol trace (errors in red), auto-shown under `-v`/on error:
+Log — timestamped protocol trace (errors in red), auto-shown under `--debug` /
+on error:
 
 ```
-├─ Dashboard ─ Faults ─[ Log ]─────────────────────────────────────────┤
+├─ Dashboard ─ Faults ─ Live Data ─[ Log ]─────────────────────────────┤
 │ 14:32:07  trecu ready — MOCK ECU (no hardware) mode. Press 'r' to read.│
 │ 14:32:08  read complete: 1 fault code(s) via iso9141                   │
 ├───────────────────────────────────────────────────────────────────────┤
@@ -403,9 +412,10 @@ behind a cancelable modal and held open by a background keepalive ticker.
 Re-reads, clears, and live polls reuse it rather than re-initialising the K-line,
 and all of them connect through that controller's single connect path. A failed
 operation tears the session down (`_ecu.close()`) so the
-next read reconnects cleanly; `on_unmount` closes it on exit. The spine grows a
-green **`⚡` keepalive lamp** while a session is live — the first honest
-indicator of the "session is doing something" model.
+next read reconnects cleanly; `on_unmount` closes it on exit. The **`⚡`
+keepalive lamp** these drafts proposed was dropped: a held session is exactly
+what the title bar's `connected` state means, so a second glyph for it added
+noise, not information.
 
 Reads still run in `asyncio.to_thread` inside an `exclusive` `@work(group="ecu")`
 so a Read and a Clear can't overlap; the half-duplex constraint is *also* now
@@ -422,15 +432,16 @@ lifecycle those sit on; the poll loop replaces the one-shot `@work` reader.
 
 Value + unit + running min/max + trend sparkline per PID is **shipped**, driven
 by the `set_interval` poll loop over `DiagnosticService.read_live`; `space`
-freezes the stream and the spine reads `streaming N sensors` / `frozen`. Still
+freezes the stream and the title bar reads `streaming...` / `frozen`. Still
 open from the mockup below: user-driven PID selection (`p`), CSV record (`R`),
 and adjustable rate (`+/-`) — deferred, not blocking Phase 4. (The mockup's
 "6 Hz" is aspirational; K-line OBD polls each PID as a separate paced round-trip,
-so the real cadence is ~1–2 Hz.)
+so the real cadence is ~1–2 Hz. Its poll-rate and `⚡keepalive` indicators were
+not built — the title bar carries one state label, nothing more.)
 
 ```
-┌ TrECU ─────────────────────────────  polling 8 PIDs @ 6 Hz  ⚡keepalive ┐
-├─ Dashboard ─ Faults ─[ Live Data ]─ Throttle Sync ──────────────────────┤
+┌───────────────────── TrECU v0.1.0 — ● streaming... ─────────────────────┐
+├─ Dashboard ─ Faults ─[ Live Data ]─ Log ─ Throttle Sync ────────────────┤
 │ Sensor              Value    Unit   Min    Max    Trend                  │
 │ Engine speed        1248     rpm    1180   1310   ▁▂▄▇▆▄▂▁▂▃             │
 │ Coolant temp          92     °C       88     93   ▅▅▆▆▆▇▇▇▇▇             │
