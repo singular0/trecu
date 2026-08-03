@@ -7,23 +7,12 @@ populating the Live Data tab.
 """
 
 import asyncio
-import time
 
 from trecu.protocol.iso9141 import Iso9141Client
 from trecu.protocol.kwp2000 import Kwp2000Client
 from trecu.service import DEFAULT_LIVE_PIDS, DiagnosticService
 from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
-
-
-async def _wait_for(pilot, cond, timeout=5.0):
-    """Pause until an off-thread TUI operation satisfies ``cond``."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return
-        await pilot.pause(0.05)
-    raise AssertionError("condition not met within timeout")
 
 
 # -- client-level read_live --------------------------------------------------
@@ -113,42 +102,32 @@ def test_mock_values_move_between_reads():
 
 
 # -- TUI poll loop populates the Live Data tab -------------------------------
-def test_tui_live_tab_streams():
-    from trecu.tui.app import TrecuApp
-
+def test_tui_live_tab_streams(mock_app, wait_for):
     # A small PID set keeps the test fast while still exercising multiple real,
     # paced K-line round-trips through the mock.
     live_pids = [0x0C, 0x05, 0x11]
-    app = TrecuApp(
-        transport_factory=lambda: MockObdTransport(),
-        mock=True,
-        port="mock",
-        protocol="iso9141",
-        keepalive_interval=0,
-        poll_interval=0.05,
-        live_pids=live_pids,
-    )
+    app = mock_app(poll_interval=0.05, live_pids=live_pids)
 
     async def scenario():
         async with app.run_test() as pilot:
             # The mount-triggered read and live snapshots both run off-thread.
             # Wait on their observable results rather than assuming CI scheduling
             # will complete them within a fixed sleep.
-            await _wait_for(pilot, lambda: app._state == "connected")
+            await wait_for(lambda: app._state == "connected", pilot.pause)
             app.action_show_tab("tab-live")  # entering Live Data starts polling
             table = app.query_one("#live")
-            await _wait_for(pilot, lambda: table.row_count == len(live_pids))
+            await wait_for(lambda: table.row_count == len(live_pids), pilot.pause)
             assert table.row_count == len(live_pids)
             assert app._streaming is True
             # Leaving the tab pauses the stream.
             app.action_show_tab("tab-faults")
-            await _wait_for(pilot, lambda: not app._streaming)
+            await wait_for(lambda: not app._streaming, pilot.pause)
             assert app._streaming is False
 
     asyncio.run(scenario())
 
 
-def test_live_table_keeps_skipped_pids_and_cursor():
+def test_live_table_keeps_skipped_pids_and_cursor(mock_app):
     """A PID absent from one snapshot keeps its row, and the row cursor holds.
 
     Regression: the live table used to clear + rebuild every tick, so a PID the
@@ -156,17 +135,9 @@ def test_live_table_keeps_skipped_pids_and_cursor():
     to the top row on every update.
     """
     from trecu.protocol.pids import SensorReading
-    from trecu.tui.app import TrecuApp
     from trecu.tui.live_table import LiveTable
 
-    app = TrecuApp(
-        transport_factory=lambda: MockObdTransport(),
-        mock=True,
-        port="mock",
-        protocol="iso9141",
-        keepalive_interval=0,
-        live_pids=[0x0C, 0x05, 0x11],
-    )
+    app = mock_app(live_pids=[0x0C, 0x05, 0x11])
 
     def snap(values):
         return [

@@ -11,7 +11,7 @@ Effort key: **S** ≈ a session, **M** ≈ a few days, **L** ≈ a week+, **XL**
 
 ## Where we are today
 
-Built and tested (181 tests, all against the mock ECUs):
+Built and tested (187 tests, all against the mock ECUs):
 
 - **Two duck-typed protocol clients** — `Iso9141Client` (5-baud slow init + OBD-II
   Modes 01/03/04/07/09) and `Kwp2000Client` (fast-init + KWP2000 services incl.

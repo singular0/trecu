@@ -224,6 +224,21 @@ def test_keepalive_fires_on_interval():
     assert spy.keepalives >= 2        # ticker beat several times while idle
 
 
+def test_keepalive_beat_count_is_readable_from_another_thread():
+    """``beats`` is written by the ticker and read by whoever asks, so it goes
+    through a lock — a bare ``+= 1`` on an int attribute is not atomic."""
+    spy = SpyClient()
+    svc = _spy_service(spy)
+    svc.start_session(keepalive_interval=0.02)
+    ticker = svc._keepalive
+    try:
+        time.sleep(0.15)
+        assert ticker.beats >= 2      # readable mid-run, from the main thread
+    finally:
+        svc.close()                   # joins the ticker, so the count settles
+    assert ticker.beats == spy.keepalives  # every beat that ran was counted
+
+
 def test_keepalive_serialized_behind_io_lock():
     """A beat can't touch the wire while a real operation holds the lock."""
     spy = SpyClient()
@@ -309,18 +324,16 @@ def test_iso9141_keepalive_pokes_link():
 
 
 # -- TUI owns one long-lived session -----------------------------------------
-def test_tui_reuses_one_session_across_reads():
-    from trecu.tui.app import TrecuApp
-
+def test_tui_reuses_one_session_across_reads(mock_app):
     builds = {"n": 0}
 
     def factory():
         builds["n"] += 1
         return MockKLineTransport()
 
-    app = TrecuApp(
-        transport_factory=factory, mock=True, port="mock", keepalive_interval=0
-    )
+    # The KWP mock needs the auto sweep (it refuses both slow inits), unlike
+    # the fixture's iso9141 default.
+    app = mock_app(factory, protocol="auto")
 
     async def scenario():
         async with app.run_test() as pilot:

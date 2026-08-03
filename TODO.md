@@ -1,6 +1,6 @@
 # trecu — architecture review & cleanup backlog
 
-An architecture review of the current tree (~5,000 lines of `trecu/`, 181 tests
+An architecture review of the current tree (~5,000 lines of `trecu/`, 187 tests
 passing in ~56 s), captured as actionable work. This is **maintenance and
 structural debt**, distinct from `ROADMAP.md`, which tracks *features* by phase.
 Nothing here changes what the tool does; it changes how cheaply the roadmap
@@ -351,15 +351,30 @@ said "the body has **three** tabs" and then listed four; `ROADMAP.md`'s "where
 we are today" still claimed **31** tests and the old `--read`/`--clear`/
 `--list-ports`/`--live` flags in four places.
 
-## Minor
+## Minor — **done**
 
-- [ ] `Transport.fast_init` is `@abstractmethod` while `five_baud_init` is
-      optional-with-raise (`base.py:53-67`), so `MockObdTransport` must
-      implement-and-raise (`mock_obd.py:68`). Make both optional, gated by the
-      capability flags that already exist.
-- [ ] `_Keepalive.beats` (`service.py:79`) is incremented from the ticker thread
-      and read elsewhere without synchronization.
-- [ ] No `conftest.py` and no fixtures anywhere; six test files construct
-      `TrecuApp` independently.
-- [ ] `pids.py:108` — a table entry missing `"formula"` raises `KeyError`, not
-      the `FormulaError` the module docstring promises for load-time failures.
+- [x] `Transport.fast_init` was `@abstractmethod` while `five_baud_init` was
+      optional-with-raise, so `MockObdTransport` had to implement-and-raise.
+      Both are optional now, gated by the `supports_fast_init` /
+      `supports_slow_init` flags the protocol layer already branches on; the
+      base-class raise is the backstop for a caller that ignored the flag, and
+      the mock's stub is gone.
+- [x] `_Keepalive.beats` was `+= 1`'d from the ticker thread and read from
+      wherever — not atomic. It's `_beats` behind a `threading.Lock` now, read
+      through a `beats` property that takes the same lock.
+- [x] Added `tests/conftest.py` (`mock_app`, `picker_app`, `wait_for`) and
+      `tests/mock_ecus.py` (the counting / gated / failing OBD doubles,
+      `FAIL_FAST`, `TWO_PORTS`). Six test files built `TrecuApp` by hand, four
+      declared their own `_wait_for`, and two declared the same two mock
+      transports; each is now defined once. `picker_app` deliberately does not
+      default `protocol` — which mock a test hands back decides whether it wants
+      the auto sweep or a named path.
+- [x] `PidDef.from_entry` raises `FormulaError` for a missing or non-string
+      `"formula"`, not a bare `KeyError`/`TypeError` — the module docstring
+      promises every bad table entry fails that way at load.
+
+Suite is 187 tests — six new cases over three areas: the `FormulaError`
+load-time guarantee, the beat counter (readable mid-run, and settled + equal to
+the beats that actually ran once the ticker is joined), and a new
+`test_transport_capabilities.py` asserting a `Transport` subclass needs *neither*
+init to be constructible and that each mock's flags match the inits it serves.

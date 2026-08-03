@@ -44,6 +44,16 @@ def test_piddef_decode_and_byte_count_guard():
         d.decode(bytes((0x14,)))  # needs 2 bytes, got 1
 
 
+def test_table_entry_without_a_usable_formula_fails_as_a_formula_error():
+    # The module promises every bad table entry fails at *load* with a
+    # FormulaError — a missing (or non-string) formula used to leak a bare
+    # KeyError/TypeError through that guarantee instead.
+    with pytest.raises(FormulaError, match="no formula"):
+        PidDef.from_entry(0x0C, {"name": "Engine RPM", "bytes": 2})
+    with pytest.raises(FormulaError, match="must be a string"):
+        PidDef.from_entry(0x0C, {"name": "Engine RPM", "formula": 42})
+
+
 # -- PidDatabase -------------------------------------------------------------
 def test_database_loads_default_pids():
     db = PidDatabase.load_default()

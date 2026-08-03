@@ -118,7 +118,16 @@ class PidDef:
 
     @classmethod
     def from_entry(cls, pid: int, entry: dict) -> "PidDef":
-        formula = entry["formula"]
+        # A table entry with no (or a non-string) formula is a load-time table
+        # error like any other, so it raises FormulaError here rather than
+        # letting a bare KeyError/TypeError out of a "loads or fails loudly" API.
+        formula = entry.get("formula")
+        if not isinstance(formula, str):
+            raise FormulaError(
+                f"PID 0x{pid:02X}: table entry has no formula"
+                if formula is None
+                else f"PID 0x{pid:02X}: formula must be a string, got {formula!r}"
+            )
         return cls(
             pid=pid,
             name=entry.get("name", f"PID 0x{pid:02X}"),

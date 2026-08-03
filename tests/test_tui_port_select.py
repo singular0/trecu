@@ -1,32 +1,22 @@
+"""The startup port picker: it appears when no port is fixed, and its choice
+is what the session then connects over."""
+
 import asyncio
 
-from trecu.tui.app import TrecuApp
 from trecu.tui.port_select import PortSelectScreen
 from trecu.transport.mock_kline import MockKLineTransport
 
-TWO_PORTS = [
-    {"device": "/dev/cu.usbserial-A", "description": "FT232R USB UART",
-     "manufacturer": "FTDI", "vid": 0x0403, "pid": 0x6001,
-     "serial_number": "A", "likely_kkl": True},
-    {"device": "/dev/cu.usbserial-B", "description": "FT232R USB UART",
-     "manufacturer": "FTDI", "vid": 0x0403, "pid": 0x6001,
-     "serial_number": "B", "likely_kkl": True},
-]
+from mock_ecus import TWO_PORTS
 
 
-def test_picker_shown_when_multiple_ports_and_selection_reads():
+def test_picker_shown_when_multiple_ports_and_selection_reads(picker_app):
     picked = {}
 
     def transport_for_port(device):
         picked["device"] = device
         return MockKLineTransport()
 
-    app = TrecuApp(
-        transport_factory=None,
-        mock=False,
-        list_ports=lambda: list(TWO_PORTS),
-        transport_for_port=transport_for_port,
-    )
+    app = picker_app(transport_for_port)
 
     async def scenario():
         async with app.run_test() as pilot:
@@ -41,19 +31,14 @@ def test_picker_shown_when_multiple_ports_and_selection_reads():
     asyncio.run(scenario())
 
 
-def test_connect_button_reads_highlighted_port():
+def test_connect_button_reads_highlighted_port(picker_app):
     picked = {}
 
     def transport_for_port(device):
         picked["device"] = device
         return MockKLineTransport()
 
-    app = TrecuApp(
-        transport_factory=None,
-        mock=False,
-        list_ports=lambda: list(TWO_PORTS),
-        transport_for_port=transport_for_port,
-    )
+    app = picker_app(transport_for_port)
 
     async def scenario():
         async with app.run_test() as pilot:
@@ -67,19 +52,14 @@ def test_connect_button_reads_highlighted_port():
     asyncio.run(scenario())
 
 
-def test_rescan_repopulates_after_ports_appear():
+def test_rescan_repopulates_after_ports_appear(picker_app):
     calls = {"n": 0}
 
     def lister():
         calls["n"] += 1
         return [] if calls["n"] == 1 else list(TWO_PORTS)
 
-    app = TrecuApp(
-        transport_factory=None,
-        mock=False,
-        list_ports=lister,
-        transport_for_port=lambda d: MockKLineTransport(),
-    )
+    app = picker_app(lambda d: MockKLineTransport(), list_ports=lister)
 
     async def scenario():
         async with app.run_test() as pilot:

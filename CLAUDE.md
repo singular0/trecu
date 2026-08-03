@@ -23,7 +23,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (181 tests, ~56s, no hardware)
+./.venv/bin/python -m pytest              # full suite (187 tests, ~56s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
@@ -42,6 +42,16 @@ the cable.
 Tests run **entirely against the in-memory mock ECUs** — never require hardware,
 and any new test must follow suit. Use `--debug` on the CLI to dump raw byte
 traffic when debugging a protocol (it also auto-opens the TUI's Log tab).
+
+Shared test scaffolding lives in two files, so a new test doesn't rebuild it:
+`tests/conftest.py` has the fixtures — `mock_app` (a `TrecuApp` on a fixed mock
+ECU: simulated port, `iso9141`, no keepalive ticker), `picker_app` (no port yet,
+so it opens the picker; protocol deliberately *not* defaulted), and `wait_for`
+(`await wait_for(cond, pilot.pause)` — reads/clears/live polls run off the event
+loop in `asyncio.to_thread`, so poll for the result, never `sleep` a guess).
+`tests/mock_ecus.py` has the ECU doubles more than one file needs — counting /
+gated (5-baud init blocks on an `Event`, for mid-connect assertions) / failing —
+plus `FAIL_FAST` (one init attempt, no settle wait) and `TWO_PORTS`.
 
 ## Releasing
 
@@ -175,7 +185,11 @@ branches on them rather than on concrete types:
   over a transport that can't do its init. `MockObdTransport` is slow-init only;
   `MockKLineTransport` is fast-init only *by default* (pass
   `supports_slow_init=True` to emulate the Keihin 5-baud init for `kwp-slow`);
-  `KLineSerialTransport` does both.
+  `KLineSerialTransport` does both. **Neither `fast_init` nor `five_baud_init`
+  is abstract**: a transport implements whichever waveform its device can drive
+  and the flag is what declares that, so a mock doing one init doesn't
+  implement-and-raise the other — `Transport`'s own raise is only the backstop
+  for a caller that ignored the flag.
 
 **Two mock ECUs, one per protocol path** (`transport/mock_obd.py`,
 `transport/mock_kline.py`). `MockObdTransport` is the default `--mock` and emulates the

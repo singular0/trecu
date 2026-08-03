@@ -8,65 +8,20 @@ runs against the in-memory mock ECUs on a bare asyncio loop — no Textual.
 import asyncio
 import threading
 
-from trecu.protocol.iso9141 import Iso9141Config
-from trecu.protocol.kwp2000 import SlowInitConfig
-from trecu.transport.base import TransportError
-from trecu.transport.mock_obd import MockObdTransport
 from trecu.tui.session import ConnectOutcome, SessionController
 
-# One-shot init so a failing connect gives up immediately (no retry sleeps).
-_FAIL_FAST = Iso9141Config(slow_init=SlowInitConfig(init_retries=1, retry_wait=0.0))
-
-
-class CountingObdTransport(MockObdTransport):
-    """Mock ECU that records how often it was closed (per instance)."""
-
-    def __init__(self):
-        super().__init__()
-        self.closes = 0
-
-    def close(self) -> None:
-        self.closes += 1
-        super().close()
-
-
-class GatedObdTransport(CountingObdTransport):
-    """Mock ECU whose 5-baud init blocks until a gate is released.
-
-    The stall sits inside ``client.connect()``, so a test can observe the
-    controller mid-attempt and cancel it there.
-    """
-
-    def __init__(self, gate: threading.Event):
-        super().__init__()
-        self._gate = gate
-
-    def five_baud_init(self, address: int) -> None:
-        self._gate.wait(timeout=5)
-        super().five_baud_init(address)
-
-
-class FailingObdTransport(CountingObdTransport):
-    """Mock ECU whose 5-baud init always fails, so ``connect()`` raises."""
-
-    def five_baud_init(self, address: int) -> None:
-        raise TransportError("simulated 5-baud init failure")
+from mock_ecus import (
+    FAIL_FAST,
+    CountingObdTransport,
+    FailingObdTransport,
+    GatedObdTransport,
+)
 
 
 def _controller(factory, **kw) -> SessionController:
     kw.setdefault("protocol", "iso9141")
     kw.setdefault("keepalive_interval", 0)
     return SessionController(transport_factory=factory, **kw)
-
-
-async def _wait_for(cond, timeout=5.0):
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if cond():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition not met within timeout")
 
 
 # -- connect -----------------------------------------------------------------
@@ -116,7 +71,7 @@ def test_failed_connect_reports_the_error_and_closes_the_transport():
         built.append(t)
         return t
 
-    ctl = _controller(factory, config=_FAIL_FAST)
+    ctl = _controller(factory, config=FAIL_FAST)
 
     async def scenario():
         result = await ctl.connect()
@@ -140,7 +95,7 @@ def test_connect_without_a_port_fails_rather_than_raising():
 
 
 # -- concurrent callers share one attempt ------------------------------------
-def test_concurrent_connects_share_one_attempt():
+def test_concurrent_connects_share_one_attempt(wait_for):
     """A Read and a live poll racing must not open the port twice."""
     gate = threading.Event()
     built = []
@@ -155,7 +110,7 @@ def test_concurrent_connects_share_one_attempt():
 
     async def scenario():
         first = asyncio.ensure_future(ctl.connect(on_start=lambda: starts.append(1)))
-        await _wait_for(lambda: ctl.connecting)
+        await wait_for(lambda: ctl.connecting)
         # Second caller joins the in-flight attempt: no second spinner, no
         # second transport.
         second = asyncio.ensure_future(ctl.connect(on_start=lambda: starts.append(1)))
@@ -170,7 +125,7 @@ def test_concurrent_connects_share_one_attempt():
 
 
 # -- cancel ------------------------------------------------------------------
-def test_cancel_abandons_the_in_flight_connect():
+def test_cancel_abandons_the_in_flight_connect(wait_for):
     gate = threading.Event()
     built = []
 
@@ -183,7 +138,7 @@ def test_cancel_abandons_the_in_flight_connect():
 
     async def scenario():
         pending = asyncio.ensure_future(ctl.connect())
-        await _wait_for(lambda: ctl.connecting)
+        await wait_for(lambda: ctl.connecting)
         # Cancel returns at once — while the handshake is still stalled — and
         # force-closes the transport so that blocked read can unwind.
         assert ctl.cancel() is True
@@ -197,7 +152,7 @@ def test_cancel_abandons_the_in_flight_connect():
     asyncio.run(scenario())
 
 
-def test_connect_after_cancel_starts_a_fresh_attempt():
+def test_connect_after_cancel_starts_a_fresh_attempt(wait_for):
     """A cancelled attempt must not be adopted by the next connect request.
 
     Regression guard for the live-poll path: cancelling the spinner and then
@@ -216,7 +171,7 @@ def test_connect_after_cancel_starts_a_fresh_attempt():
 
     async def scenario():
         doomed = asyncio.ensure_future(ctl.connect())
-        await _wait_for(lambda: ctl.connecting)
+        await wait_for(lambda: ctl.connecting)
         assert ctl.cancel() is True
         assert not ctl.connecting  # detached: the next request starts over
         gate.set()

@@ -66,7 +66,17 @@ class _Keepalive:
         self._thread = threading.Thread(
             target=self._run, name="trecu-keepalive", daemon=True
         )
-        self.beats = 0
+        # The count is written by the ticker thread and read from whichever
+        # thread asks, so both ends go through this lock — `+= 1` on an int
+        # attribute is not atomic.
+        self._count_lock = threading.Lock()
+        self._beats = 0
+
+    @property
+    def beats(self) -> int:
+        """Completed beats so far; safe to read from any thread."""
+        with self._count_lock:
+            return self._beats
 
     def start(self) -> None:
         self._thread.start()
@@ -77,9 +87,11 @@ class _Keepalive:
         while not self._stop.wait(self._interval):
             try:
                 self._beat()
-                self.beats += 1
             except Exception as exc:  # noqa: BLE001 - keepalive is best-effort
                 self._log.warning(f"keepalive failed: {exc}")
+            else:
+                with self._count_lock:
+                    self._beats += 1
 
     def stop(self) -> None:
         self._stop.set()

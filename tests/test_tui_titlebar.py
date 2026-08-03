@@ -1,36 +1,25 @@
 """The native title bar carries the app identity and connection state."""
 
 import asyncio
-import time
 
 from textual.widgets import Header
 
 from trecu import __version__
-from trecu.tui.app import TrecuApp
-from trecu.transport.mock_obd import MockObdTransport
 
 
-def test_titlebar_shows_name_version_and_connection_status():
-    app = TrecuApp(
-        transport_factory=MockObdTransport,
-        mock=True,
-        port="mock",
-        keepalive_interval=0,
-        protocol="iso9141",
-    )
+def test_titlebar_shows_name_version_and_connection_status(mock_app, wait_for):
+    app = mock_app()
 
     async def scenario():
         async with app.run_test() as pilot:
             app.query_one(Header)
-            deadline = time.monotonic() + 5
-            while app._state != "connected" and time.monotonic() < deadline:
-                await pilot.pause(0.05)
+            await wait_for(lambda: app._state == "connected", pilot.pause)
 
-            assert app._state == "connected"
             expected = f"TrECU v{__version__} — ● connected"
             title_widget = app.query_one(Header).query_one("HeaderTitle")
-            while title_widget.render().plain != expected and time.monotonic() < deadline:
-                await pilot.pause(0.05)
+            await wait_for(
+                lambda: title_widget.render().plain == expected, pilot.pause
+            )
             assert title_widget.render().plain == expected
             assert not app.query("#spine")
 

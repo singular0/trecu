@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import List, Tuple
 
 from ._mock_live import sensor_data
-from .base import Transport, TransportError
+from .base import Transport
 
 # Default stored fault: 0x1108 -> P1108 (ambient air pressure sensor).
 _DEFAULT_DTCS: List[Tuple[int, int]] = [(0x11, 0x08)]
@@ -65,8 +65,8 @@ class MockObdTransport(Transport):
         del self._rx[:n]
         return out
 
-    def fast_init(self, low_ms: int = 25, high_ms: int = 25) -> None:
-        raise TransportError("mock OBD ECU does not support fast-init")
+    # No fast_init: ``supports_fast_init = False`` already says so, and the base
+    # class refuses the call for anything that ignores the flag.
 
     def five_baud_init(self, address: int) -> None:
         self._rx.clear()
