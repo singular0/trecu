@@ -13,6 +13,7 @@ COMMANDS = (
     "faults",
     "info",
     "sensors",
+    "pids",
     "clear",
     "version",
     "help",
@@ -28,7 +29,7 @@ def test_help_prints_public_usage(capsys) -> None:
     assert main(["help"]) == 0
     output = capsys.readouterr().out
     assert output.startswith(
-        "usage: trecu [tui|ports|faults|info|sensors|clear|version|help]"
+        "usage: trecu [tui|ports|faults|info|sensors|pids|clear|version|help]"
     )
     assert "--init-address INIT_ADDRESS" in output
     assert "--timeout TIMEOUT" in output
@@ -87,13 +88,24 @@ def test_sensors_command_omits_table_title(capsys) -> None:
     assert "Unit" in output
 
 
+def test_pids_command_shows_the_three_states_apart(capsys) -> None:
+    """The headless capability view: advertised, decodable, and answered are
+    three columns, never one verdict — and a PID outside the bitmap is shown as
+    unadvertised rather than quietly missing from the table."""
+    assert main(["pids", "--mock"]) == 0
+    output = capsys.readouterr().out
+    assert "Advertised" in output and "Decodable" in output and "Answered" in output
+    assert "Engine RPM" in output          # advertised, decodable, answered
+    assert "Control module" in output      # PID 42: decodable, but not advertised
+
+
 def test_clear_command_confirms_on_stdout(capsys) -> None:
     assert main(["clear", "--mock", "-y"]) == 0
     assert "Fault codes cleared." in capsys.readouterr().out
 
 
 # -- the shared service wrapper ------------------------------------------------
-@pytest.mark.parametrize("command", ("faults", "info", "sensors", "clear"))
+@pytest.mark.parametrize("command", ("faults", "info", "sensors", "pids", "clear"))
 def test_ecu_commands_share_one_failure_path(command: str, capsys) -> None:
     """All four ECU subcommands run through ``_with_service``, so an
     unreachable cable is exit 2 + ``error:`` on stderr for every one of them —

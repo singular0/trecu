@@ -20,6 +20,11 @@ bike's diagnostic connector.
 - **Live sensor streaming** — engine RPM, coolant temp, throttle position,
   intake MAP, O2, and battery voltage in a continuously-updating table with
   running min/max and trend sparklines.
+- **Capability detection** — the ECU is asked which PIDs it supports the moment
+  the session opens, and only those are polled, so a sensor your bike doesn't
+  have costs nothing instead of a timeout every refresh. `trecu pids` shows the
+  three states side by side: advertised by the ECU, decodable by TrECU, and
+  actually answered.
 - **Keyboard-driven TUI** — Dashboard, Faults, Live Data, and protocol Log tabs
   over one persistent, kept-alive ECU session.
 - **Headless CLI** — one-shot read, live snapshot, clear, and port listing for
@@ -112,6 +117,7 @@ trecu ports                # list detected serial ports
 trecu faults               # read and print stored fault codes
 trecu info                 # print ECU identification
 trecu sensors              # print a live-sensor snapshot
+trecu pids                 # print which PIDs the ECU supports, and which TrECU reads
 trecu clear                # clear stored fault codes (asks first)
 trecu clear -y             # clear without prompting
 trecu faults --debug       # include raw protocol traffic

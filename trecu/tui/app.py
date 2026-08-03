@@ -508,6 +508,23 @@ class TrecuApp(App):
             Text.from_markup("\n".join(lines))
         )
 
+    def _sensor_summary(self) -> str:
+        """What the ECU claims it can report, and how much of that TrECU decodes.
+
+        Two of the three live-data states belong here — *advertised* by the ECU
+        and *decodable* by this build. The third, which PIDs actually answered,
+        is the Live Data table itself, so no single number can blur them
+        together. "not reported" is its own answer again: an ECU that never sent
+        a capability bitmap is unknown, not empty.
+        """
+        if self._last is None:
+            return "—"
+        advertised = self._last.supported_pids
+        if advertised is None:
+            return "not reported"
+        decodable = sum(1 for pid in advertised if pid in self._pids)
+        return f"{len(advertised)} advertised · {decodable} decodable"
+
     def _refresh_connection_card(self) -> None:
         mode = "Mock" if self._mock else "Serial"
         port = self._port or "—"
@@ -516,6 +533,7 @@ class TrecuApp(App):
             f"[b]{'Mode':<10}[/]{mode}",
             f"[b]{'Port':<10}[/]{port}",
             f"[b]{'Protocol':<10}[/]{proto}",
+            f"[b]{'Sensors':<10}[/]{self._sensor_summary()}",
         ]
         self.query_one("#card-connection", Static).update(
             Text.from_markup("\n".join(lines))

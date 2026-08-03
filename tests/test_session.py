@@ -27,6 +27,10 @@ class SpyClient:
     AttributeError rather than a readable assertion.
     """
 
+    #: Capability like an ECU that never reported a bitmap: *unknown*, so the
+    #: service filters nothing out of a live plan.
+    supported_pids = None
+
     def __init__(self):
         self.connects = 0
         self.reads = 0
@@ -37,6 +41,9 @@ class SpyClient:
     def connect(self) -> ConnectionInfo:
         self.connects += 1
         return ConnectionInfo(key_bytes=b"\x01\x02", session_started=True)
+
+    def live_plan(self, pids):
+        return list(pids)
 
     def read_dtcs(self):
         self.reads += 1

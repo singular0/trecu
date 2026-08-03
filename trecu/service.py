@@ -9,7 +9,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Iterator, List, Optional, Union
+from typing import Callable, FrozenSet, Iterable, Iterator, List, Optional, Union
 
 from .logging import Logger, LoggerLike, as_logger
 from .protocol.common import ConnectionInfo, EcuInfo, ProtocolError
@@ -28,6 +28,12 @@ DEFAULT_KEEPALIVE_INTERVAL = 2.0
 # Live streaming. The default poll set is the core dashboard
 # sensors; the cadence is the poll loop's target interval (the TUI's own timer).
 # RPM, coolant, throttle, MAP, O2 sensor 1, battery voltage.
+#
+# It is a *wish list*, not a promise: every request is filtered through the
+# session's advertised capability set, so on the tested Triumph — whose bitmap
+# does not claim PID 42 — battery voltage is silently dropped from the plan
+# instead of costing a timeout every poll, while an ECU that does advertise it
+# still gets it polled.
 DEFAULT_LIVE_PIDS = (0x0C, 0x05, 0x11, 0x0B, 0x14, 0x42)
 DEFAULT_POLL_INTERVAL = 0.5
 
@@ -116,10 +122,50 @@ class ReadResult:
     session_started: bool = False
     protocol: str = ""
     ecu_info: Optional[EcuInfo] = None
+    #: PIDs the ECU advertised for this session, or ``None`` when it never
+    #: reported them. Carried on the result so a UI can show what the session is
+    #: capable of without taking the I/O lock to ask again.
+    supported_pids: Optional[FrozenSet[int]] = None
 
     @property
     def count(self) -> int:
         return len(self.dtcs)
+
+
+@dataclass(frozen=True)
+class PidStatus:
+    """What one live-data PID is, in the three states that must not be conflated.
+
+    * ``advertised`` — the ECU's Mode 01 capability bitmap claims it. ``None``
+      when the ECU never reported a usable bitmap: capability *unknown*, which
+      is not the same as "unsupported".
+    * ``decodable`` — TrECU's sensor table can turn its bytes into a value.
+      An advertised PID TrECU cannot decode is still readable as raw data.
+    * ``answered`` — it actually replied when asked; ``None`` means it was never
+      asked. Data of ``00``/``FF`` is an *answer* (``raw`` holds the bytes);
+      absence of a reply is the only thing that makes this False.
+
+    They are independent: a PID can be advertised and undecodable, decodable and
+    unadvertised, or advertised and silent — and each of those is a different
+    fact about the session.
+    """
+
+    pid: int
+    name: str
+    unit: str = ""
+    advertised: Optional[bool] = None
+    decodable: bool = False
+    answered: Optional[bool] = None
+    raw: bytes = b""
+
+    @property
+    def polled(self) -> bool:
+        """Whether a live poll would request this PID.
+
+        Unknown capability polls: with no bitmap to filter on, an unfiltered
+        request is the only honest move.
+        """
+        return self.advertised is not False and self.decodable
 
 
 class DiagnosticService:
@@ -170,6 +216,16 @@ class DiagnosticService:
     def transport(self) -> Optional[Transport]:
         """The device held for the current session (``None`` once closed)."""
         return self._transport
+
+    @property
+    def supported_pids(self) -> Optional[FrozenSet[int]]:
+        """PIDs the connected ECU advertises; ``None`` when that isn't known.
+
+        Reads the connected client's session cache — no wire traffic, and no
+        connect: before a session exists the answer is simply unknown. ``None``
+        never means "supports nothing"; that would be an empty set.
+        """
+        return self._active.supported_pids if self._active is not None else None
 
     # -- lifecycle -----------------------------------------------------------
     def _device(self) -> Transport:
@@ -334,6 +390,7 @@ class DiagnosticService:
                 session_started=info.session_started if info else False,
                 protocol=self._active_proto,
                 ecu_info=ecu_info if ecu_info and not ecu_info.is_empty else None,
+                supported_pids=client.supported_pids,
             )
 
     def read_identification(self) -> Optional[EcuInfo]:
@@ -361,6 +418,37 @@ class DiagnosticService:
             client.clear_dtcs()
             self._logger.debug("ECU operation complete: fault codes cleared")
 
+    def live_plan(self, pids: Optional[Iterable[int]] = None) -> List[int]:
+        """The PIDs a live poll would actually put on the wire, in order.
+
+        The intersection of three independent things: what the caller asked for,
+        what the ECU advertised (:attr:`supported_pids` — the client's filter,
+        skipped entirely when capability is unknown), and what TrECU's sensor
+        table can decode. Connects lazily like any other operation, because the
+        advertised half of the answer only exists once there is a session.
+        """
+        requested = list(DEFAULT_LIVE_PIDS) if pids is None else list(pids)
+        with self._io_lock:
+            return self._plan(self._connect(), requested)
+
+    def _plan(self, client: Iso9141Client, requested: List[int]) -> List[int]:
+        """``requested`` narrowed to advertised (client) then decodable (table).
+
+        Each layer applies the rule it alone owns: the client knows what the ECU
+        claims, this knows what the sensor table understands. Runs under a held
+        ``_io_lock``; it costs no traffic (the capability set is cached).
+        """
+        advertised = client.live_plan(requested)
+        plan = [pid for pid in advertised if pid in self.pids]
+        dropped = [pid for pid in advertised if pid not in self.pids]
+        if dropped:
+            self._logger.debug(
+                "live plan drops "
+                + " ".join(f"{pid:02X}" for pid in dropped)
+                + ": no decoder for them in this build"
+            )
+        return plan
+
     def read_live(
         self, pids: Optional[Iterable[int]] = None
     ) -> List[SensorReading]:
@@ -373,19 +461,23 @@ class DiagnosticService:
         computation, no wire traffic). Meant to be called repeatedly by the
         TUI's poll loop.
 
-        One snapshot is one OBD Mode 01 request per PID; ``pids=None`` uses
-        :data:`DEFAULT_LIVE_PIDS`. A PID the ECU didn't answer — or the table
-        can't decode — is dropped.
+        One snapshot is one OBD Mode 01 request per PID in :meth:`live_plan` —
+        so an unadvertised or undecodable PID costs no request and no timeout.
+        ``pids=None`` uses :data:`DEFAULT_LIVE_PIDS`. A planned PID the ECU
+        didn't answer this time is dropped from the snapshot, not from the plan.
         """
         requested = list(DEFAULT_LIVE_PIDS) if pids is None else list(pids)
         with self._io_lock:
             client = self._connect()
-            self._logger.debug("ECU operation: reading live data")
-            raw = client.read_live(requested)
+            plan = self._plan(client, requested)
+            self._logger.debug(
+                f"ECU operation: reading live data ({len(plan)} PID(s))"
+            )
+            raw = client.read_live(plan)
         readings: List[SensorReading] = []
-        for pid in requested:
+        for pid in plan:
             data = raw.get(pid)
-            if data is None or pid not in self.pids:
+            if data is None:
                 continue
             try:
                 readings.append(self.pids.decode(pid, data))
@@ -395,6 +487,44 @@ class DiagnosticService:
             f"ECU live-data operation complete: {len(readings)} reading(s)"
         )
         return readings
+
+    def pid_capabilities(self, probe: bool = False) -> List[PidStatus]:
+        """Every PID this session knows of, in its three independent states.
+
+        The union of what the ECU advertises and what TrECU can decode, ascending
+        by PID — so an advertised PID with no local decoder and a decodable PID
+        the ECU never claimed are both visible, each labelled for what it is.
+
+        ``probe=True`` additionally asks the ECU for its advertised PIDs once and
+        fills in ``answered`` + the raw bytes, which is the only way to tell an
+        advertised PID that really replies from one that stays silent. Nothing
+        outside the advertised set is requested, so an unsupported PID costs
+        nothing; an advertised PID that never answers costs one timeout, which is
+        precisely what establishes that it is silent.
+        """
+        with self._io_lock:
+            client = self._connect()
+            advertised = client.supported_pids
+            answers = (
+                client.read_live(sorted(advertised)) if probe and advertised else {}
+            )
+        known = set(advertised) if advertised is not None else set()
+        out: List[PidStatus] = []
+        for pid in sorted(known | set(self.pids.pids())):
+            definition = self.pids.get(pid)
+            is_advertised = None if advertised is None else pid in advertised
+            out.append(
+                PidStatus(
+                    pid=pid,
+                    name=definition.name if definition else f"PID 0x{pid:02X}",
+                    unit=definition.unit if definition else "",
+                    advertised=is_advertised,
+                    decodable=definition is not None,
+                    answered=(pid in answers) if (probe and is_advertised) else None,
+                    raw=answers.get(pid, b""),
+                )
+            )
+        return out
 
     def __enter__(self) -> "DiagnosticService":
         self.open()

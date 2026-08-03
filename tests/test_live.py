@@ -7,6 +7,7 @@ values, and the TUI's poll loop populating the Live Data tab.
 
 import asyncio
 
+from trecu.protocol.common import encode_pid_support_pages
 from trecu.protocol.iso9141 import Iso9141Client
 from trecu.service import DEFAULT_LIVE_PIDS, DiagnosticService
 from trecu.transport.mock_obd import MockObdTransport
@@ -24,26 +25,48 @@ def test_iso9141_read_live_returns_data_bytes():
     t.close()
 
 
-def test_read_live_omits_unmodelled_pids():
+def test_read_live_omits_an_advertised_pid_that_stays_silent():
+    """An advertised PID is asked for; if it doesn't answer it is simply absent
+    from the snapshot. (A PID the ECU never advertised isn't asked at all —
+    see ``test_pid_support.py``.)"""
     t = MockObdTransport()
     t.open()
     client = Iso9141Client(t)
     client.connect()
-    raw = client.read_live([0x0C, 0xEE])  # 0xEE isn't modelled by the mock
-    assert 0x0C in raw and 0xEE not in raw
+    # 0x03 is in the bike's bitmap, but the mock models no value for it.
+    raw = client.read_live([0x0C, 0x03])
+    assert 0x0C in raw and 0x03 not in raw
+    assert b"\x01\x03" in t.requests  # it *was* requested
     t.close()
 
 
 # -- service-level decode + ordering -----------------------------------------
 def test_service_read_live_decodes_default_set_in_order():
+    """The default set, in order, minus what this ECU never advertised.
+
+    The mock carries the tested bike's real capability bitmap, which does not
+    claim PID 42 (battery voltage) — so the default poll set comes back one
+    sensor short, in the order asked for.
+    """
     with DiagnosticService(MockObdTransport()) as svc:
         readings = svc.read_live()
-    assert [r.pid for r in readings] == list(DEFAULT_LIVE_PIDS)
+    expected = [pid for pid in DEFAULT_LIVE_PIDS if pid != 0x42]
+    assert [r.pid for r in readings] == expected
     by_pid = {r.pid: r for r in readings}
     assert by_pid[0x0C].unit == "rpm"
     assert 0 <= by_pid[0x0C].value <= 16384
     assert -40 <= by_pid[0x05].value <= 215        # coolant in range
     assert 0 <= by_pid[0x11].value <= 100          # throttle %
+
+
+def test_battery_voltage_is_polled_when_the_ecu_advertises_it():
+    """The default set is a wish list, not a fixed menu: an ECU that *does*
+    claim PID 42 gets it polled (the tested Triumph simply doesn't)."""
+    ecu = MockObdTransport(support_pages=encode_pid_support_pages(DEFAULT_LIVE_PIDS))
+    with DiagnosticService(ecu) as svc:
+        readings = svc.read_live()
+    by_pid = {r.pid: r for r in readings}
+    assert [r.pid for r in readings] == list(DEFAULT_LIVE_PIDS)
     assert 0 <= by_pid[0x42].value <= 65.535       # battery volts
 
 

@@ -30,32 +30,7 @@ capability, **P2** user-facing diagnostics.
      local mock suite completes in a few seconds rather than spending most of
      its time in configured retry sleeps.
 
-2. **P0 — Add Mode `01` PID auto-detection after connection.**
-
-   - Immediately after the slow-init handshake, request Mode `01` PID `00` and
-     parse its 32-bit support bitmap. Follow PID pages `20`, `40`, `60`, etc.
-     only when the preceding page's continuation bit advertises the next page.
-   - Cache the advertised PID set for the lifetime of the ECU session and
-     expose it through the ISO client and diagnostic service. Clear it on
-     disconnect or reconnect.
-   - Build the live poll plan from the intersection of caller-selected PIDs,
-     advertised PIDs, and locally decodable PIDs. Stop requesting unsupported
-     battery-voltage PID `0x42` on the tested bike.
-   - Keep three states distinct in the service and UI: advertised by the ECU,
-     successfully answered, and understood by TrECU. A supported PID returning
-     `00` or `FF` data is still a response and must not be treated as missing.
-   - Reuse PID `00` as the ISO keepalive without repeatedly rebuilding or
-     silently changing the session's cached capability set.
-   - Show the raw support bitmap and decoded PID list in debug logs, and expose
-     the list in a headless command or ECU-information view.
-   - Add byte-exact mock tests for the bike's observed `41 00 BD 36 91 10`
-     response, multiple capability pages, no continuation page, malformed and
-     missing bitmaps, partial PID replies, and cache reset after reconnect.
-   - **Done when:** every live request is capability-aware, unsupported PIDs add
-     no timeout to a poll, and advertised/answered/decoded states cannot be
-     confused.
-
-3. **P1 — Capture and replay the complete non-destructive ISO path.**
+2. **P1 — Capture and replay the complete non-destructive ISO path.**
 
    - Record sanitized raw traces for slow init at `0x33`, including a clean
      `55 08 08` / inverted-address handshake and representative garbled or
@@ -75,11 +50,17 @@ capability, **P2** user-facing diagnostics.
    - **Done when:** the full ISO read-only sequence replays without hardware and
      decoded values agree with trusted references within documented tolerances.
 
-4. **P1 — Make live polling capability-aware, paced, and auditable.**
+3. **P1 — Make live polling paced and auditable.**
 
-   - Replace the single all-sensors cadence with a serialized poll plan: RPM,
-     TPS, and MAP at the fastest sustainable tier; oxygen/fuel-trim data at a
-     medium tier; temperatures and status at a slow tier.
+   The poll plan is already capability-aware: the ECU's advertised PID set is
+   read at connect and intersected with the caller's selection and the locally
+   decodable PIDs, so nothing unsupported reaches the wire. What is missing is
+   pacing and per-reading provenance.
+
+   - Replace the single all-sensors cadence with a *tiered* poll plan over that
+     same intersection: RPM, TPS, and MAP at the fastest sustainable tier;
+     oxygen/fuel-trim data at a medium tier; temperatures and status at a slow
+     tier.
    - Derive cadence from measured round-trip latency and the selected sensor
      count. Display achieved sample age/rate rather than an aspirational timer
      interval, and never overlap requests on the half-duplex K-line.
@@ -98,7 +79,7 @@ capability, **P2** user-facing diagnostics.
      every displayed value is traceable to raw bytes, and absence/failure states
      are explicit.
 
-5. **P1 — Improve serial discovery and ISO session recovery.**
+4. **P1 — Improve serial discovery and ISO session recovery.**
 
    - Deduplicate macOS device aliases that share the same VID, PID, FTDI serial
      number, USB location, and interface, while preserving genuinely separate
@@ -119,7 +100,7 @@ capability, **P2** user-facing diagnostics.
      failures recover, and a lost session cannot be mistaken for an unsupported
      sensor.
 
-6. **P2 — Add live-data selection and verifiable recording.**
+5. **P2 — Add live-data selection and verifiable recording.**
 
    - Add a sensor picker driven by the session's advertised PID set, showing
      which PIDs TrECU can decode and which are available as raw data only.
@@ -137,7 +118,7 @@ capability, **P2** user-facing diagnostics.
      decoded values remain auditable from raw frames, and recover a valid file
      after routine disconnects.
 
-7. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
+6. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
 
    - Preserve Mode `01` PID `01` as the authority for MIL state and stored-DTC
      count, with Mode `03` retries reconciled against it and Mode `07` pending

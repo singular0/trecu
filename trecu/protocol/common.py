@@ -5,15 +5,16 @@ error type, the connection/identity dataclasses the service and UI pass around,
 the 5-baud slow init (an ISO 9141-2 physical-layer handshake, not a J1979
 service), the data-link framing that turns a collected buffer into exact,
 checksum-verified frames, and the small parsers that turn raw response bytes
-into structured values. Keeping them apart from ``iso9141.py`` keeps that
-module about OBD requests and responses.
+into structured values — DTC byte pairs, Mode 09 fragments, and the supported-PID
+capability bitmaps. Keeping them apart from ``iso9141.py`` keeps that module
+about OBD requests and responses.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
@@ -44,6 +45,72 @@ def decode_identification_ascii(data: bytes) -> str:
 
 class ProtocolError(Exception):
     """Framing, timeout, or unexpected-response error."""
+
+
+# -- Mode 01 supported-PID bitmaps -------------------------------------------
+
+#: The Mode 01 PIDs that answer with a *capability bitmap* instead of a sensor
+#: value. Each advertises the following :data:`PID_PAGE_SPAN` PIDs, and the last
+#: bit of a page is the next page's own PID — so a page is only requested when
+#: the one before it advertised it. J1979 defines these up to 0xC0.
+PID_SUPPORT_PAGES = (0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0)
+#: PIDs advertised by one bitmap page.
+PID_PAGE_SPAN = 0x20
+#: Bitmap bytes in a supported-PIDs response (32 bits, one per advertised PID).
+PID_SUPPORT_BYTES = 4
+
+
+def parse_pid_support_bitmap(base: int, data: bytes) -> FrozenSet[int]:
+    """PIDs advertised by one supported-PIDs page, as a set of PID numbers.
+
+    ``data`` is the bitmap that follows ``41 <base>`` in the response: 32 bits,
+    most-significant bit first, where bit *n* (counting from 1) stands for PID
+    ``base + n``. The last bit is therefore PID ``base + 0x20`` — the *next*
+    page's own PID, so the continuation flag needs no special case: it is in the
+    returned set exactly when the ECU says the next page exists.
+
+    Anything shorter than :data:`PID_SUPPORT_BYTES` is a malformed bitmap and
+    raises :class:`ProtocolError` rather than decoding to a plausible half-set of
+    capabilities; trailing bytes past the bitmap are frame padding and ignored.
+    """
+    if len(data) < PID_SUPPORT_BYTES:
+        raise ProtocolError(
+            f"short supported-PID bitmap for page {base:02X}: "
+            + (" ".join(f"{b:02X}" for b in data) or "no data")
+        )
+    bits = int.from_bytes(data[:PID_SUPPORT_BYTES], "big")
+    return frozenset(
+        base + n
+        for n in range(1, PID_PAGE_SPAN + 1)
+        if bits & (1 << (PID_PAGE_SPAN - n))
+    )
+
+
+def encode_pid_support_pages(pids: Iterable[int]) -> Dict[int, bytes]:
+    """Bitmap pages advertising exactly ``pids`` — the inverse of the parser.
+
+    Returns ``{page base: 4 bitmap bytes}`` covering every page needed to reach
+    the highest requested PID, with each page's continuation bit set so a reader
+    following :data:`PID_SUPPORT_PAGES` walks to the end. Used to build ECU
+    doubles that advertise a chosen capability set (see
+    ``trecu.transport.mock_obd``), which keeps the mock's bitmap and the parser
+    honest about each other.
+    """
+    wanted = set(pids)
+    pages: Dict[int, bytes] = {}
+    carry = False  # a later page exists, so this one must advertise it
+    for base in reversed(PID_SUPPORT_PAGES):
+        bits = 0
+        for pid in wanted:
+            if base < pid <= base + PID_PAGE_SPAN:
+                bits |= 1 << (PID_PAGE_SPAN - (pid - base))
+        if carry:
+            bits |= 1  # the last bit *is* PID base + 0x20, the next page
+        if not bits:
+            continue  # nothing here and nothing beyond: the walk stops earlier
+        pages[base] = bits.to_bytes(PID_SUPPORT_BYTES, "big")
+        carry = True
+    return dict(sorted(pages.items()))
 
 
 def parse_obd_dtc_pairs(body: bytes, status: int) -> List[Tuple[int, int, int]]:
@@ -341,6 +408,10 @@ def slow_init_with_retries(
 class ConnectionInfo:
     key_bytes: bytes
     session_started: bool
+    #: PIDs the ECU advertised via Mode 01 PID 00 when the session opened.
+    #: ``None`` means it never gave a usable bitmap, so capability is *unknown*
+    #: — which is not the same answer as an empty set ("supports none").
+    supported_pids: Optional[FrozenSet[int]] = None
 
 
 @dataclass

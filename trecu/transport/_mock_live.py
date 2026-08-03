@@ -34,10 +34,19 @@ def _o2(v: float) -> bytes:
 
 # pid -> (base value, amplitude, angular frequency, encoder(value) -> data bytes).
 # Distinct frequencies keep the sensors visibly out of phase with one another.
+#
+# This is what the mock ECU can *answer*, which is not the same set as what it
+# advertises (see ``mock_obd``): the tested bike's bitmap claims some PIDs no
+# numeric formula decodes (status bitfields), and this table carries some the
+# bike never claimed — deliberately, so a mock built with a different bitmap can
+# serve them.
 _SENSORS: Dict[int, Tuple[float, float, float, Callable[[float], bytes]]] = {
+    0x04: (22.0, 6.0, 0.07, lambda p: _u8(p * 2.55)),      # engine load %
     0x05: (90.0, 4.0, 0.05, lambda t: _u8(t + 40)),        # coolant temp °C
+    0x06: (1.5, 3.0, 0.17, lambda p: _u8((p + 100) * 1.28)),  # short-term fuel trim %
     0x0B: (38.0, 4.0, 0.11, lambda k: _u8(k)),             # intake MAP kPa
     0x0C: (1300.0, 180.0, 0.09, lambda r: _u16(r * 4)),    # engine RPM
+    0x0E: (12.0, 4.0, 0.08, lambda d: _u8((d + 64) * 2)),  # timing advance ° BTDC
     0x0F: (26.0, 2.0, 0.03, lambda t: _u8(t + 40)),        # intake air temp °C
     0x11: (5.0, 3.0, 0.13, lambda p: _u8(p * 2.55)),       # throttle position %
     0x14: (0.45, 0.35, 0.70, _o2),                         # O2 sensor 1 voltage
@@ -49,9 +58,10 @@ _SENSORS: Dict[int, Tuple[float, float, float, Callable[[float], bytes]]] = {
 def sensor_data(pid: int, tick: int) -> Optional[bytes]:
     """Data bytes a mock ECU should reply for ``pid`` at ``tick``.
 
-    Returns ``None`` when the mock doesn't model the PID — the caller then
-    answers as unsupported (a zeroed reply or a negative response), like a real
-    ECU would for a PID it doesn't implement.
+    Returns ``None`` when the mock doesn't model the PID. For an *advertised*
+    PID that means an advertised-but-silent sensor — one of the three states a
+    capability-aware poll has to keep apart — and the caller simply doesn't
+    reply, as a real ECU does for a PID it won't answer.
     """
     entry = _SENSORS.get(pid)
     if entry is None:

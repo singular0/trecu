@@ -208,7 +208,12 @@ def test_session_latches_the_first_ecu_and_then_ignores_other_modules():
     a later answer from a different one is another module's traffic, not ours."""
     status = frame(b"\x41\x01\x81\x00\x00\xFF")
     replies = iter([status, frame(b"\x41\x01\x81\x00\x00\xFF", source=OTHER)])
-    client = connect(RawReplyEcu(lambda _payload: next(replies)))
+    # Scripted per *request*, so only the two status reads below draw from the
+    # list: connect()'s capability read asks PID 00 first and would otherwise
+    # consume the first module's answer.
+    client = connect(
+        RawReplyEcu(lambda payload: next(replies) if payload == b"\x01\x01" else b"")
+    )
 
     assert client._read_status() == (True, 1)  # latches 0xD1
     with pytest.raises(ProtocolError, match="module"):

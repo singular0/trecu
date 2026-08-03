@@ -22,7 +22,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="trecu",
         add_help=False,
         usage=(
-            "trecu [tui|ports|faults|info|sensors|clear|version|help] "
+            "trecu [tui|ports|faults|info|sensors|pids|clear|version|help] "
             "[--init-address INIT_ADDRESS] [--timeout TIMEOUT] [-y] [--debug]"
         ),
         description="Read and decode Triumph motorcycle ECU fault codes over a "
@@ -38,6 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "faults",
             "info",
             "sensors",
+            "pids",
             "clear",
             "version",
             "help",
@@ -231,6 +232,51 @@ def _print_live(readings) -> None:
     console.print(table)
 
 
+def _print_pids(statuses) -> None:
+    """Show each PID's three states side by side, never merged into one verdict.
+
+    "Advertised" is the ECU's claim, "decodable" is this build's decoder table,
+    and "answered" is what actually came back when asked — so an advertised PID
+    that stays silent reads differently from one TrECU simply can't decode, and
+    a PID answering ``00``/``FF`` shows those bytes rather than looking absent.
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    if not statuses:
+        console.print("[yellow]No PID capability reported by this ECU.[/yellow]")
+        return
+    if all(s.advertised is None for s in statuses):
+        console.print(
+            "[yellow]This ECU did not report a supported-PID bitmap — "
+            "capability unknown, so nothing is filtered out of a poll.[/yellow]"
+        )
+
+    def mark(state, yes: str = "yes", no: str = "no") -> str:
+        if state is None:
+            return "[dim]—[/dim]"
+        return f"[green]{yes}[/green]" if state else f"[dim]{no}[/dim]"
+
+    table = Table()
+    table.add_column("PID")
+    table.add_column("Sensor")
+    table.add_column("Advertised", justify="center")
+    table.add_column("Decodable", justify="center")
+    table.add_column("Answered", justify="center")
+    table.add_column("Data", style="dim")
+    for s in statuses:
+        table.add_row(
+            f"{s.pid:02X}",
+            s.name,
+            mark(s.advertised),
+            mark(s.decodable),
+            mark(s.answered),
+            " ".join(f"{b:02X}" for b in s.raw),
+        )
+    console.print(table)
+
+
 def _print_cleared(_: None) -> None:
     print("Fault codes cleared.")
 
@@ -245,6 +291,15 @@ def _cmd_info(args: argparse.Namespace) -> int:
 
 def _cmd_live(args: argparse.Namespace) -> int:
     return _with_service(args, DiagnosticService.read_live, _print_live)
+
+
+def _cmd_pids(args: argparse.Namespace) -> int:
+    # Probe: ask the ECU for what it advertised, so "answered" is a fact rather
+    # than an assumption. Nothing outside the advertised set is requested, so
+    # this costs no timeouts on an ECU with a usable bitmap.
+    return _with_service(
+        args, lambda svc: svc.pid_capabilities(probe=True), _print_pids
+    )
 
 
 def _cmd_clear(args: argparse.Namespace) -> int:
@@ -332,6 +387,8 @@ def _run(argv: Optional[List[str]] = None) -> int:
         return _cmd_info(args)
     if args.command == "sensors":
         return _cmd_live(args)
+    if args.command == "pids":
+        return _cmd_pids(args)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

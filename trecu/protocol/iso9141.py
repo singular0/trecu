@@ -9,6 +9,11 @@ cleared with Mode 04.
 Request : 68 6A F1 <mode> [pid] <cs>
 Response: 48 6B <src> <mode+0x40> <data...> <cs>
 
+The session opens with a capability read: Mode 01 PID 00 (and the further
+bitmap pages it advertises) says which PIDs this ECU implements, and that set is
+cached for the session so no live request is ever sent to a PID the ECU never
+claimed.
+
 Nothing reaches a decoder unvalidated: a response is split into whole frames
 with verified checksums (``split_response_frames`` in ``common.py``), then
 matched on header, ECU source address, response mode, and echoed PID. Corrupt,
@@ -21,12 +26,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
 from .common import (
     MAX_DATA_BYTES,
+    PID_PAGE_SPAN,
+    PID_SUPPORT_PAGES,
     STATUS_CONFIRMED,
     STATUS_PENDING,
     ConnectionInfo,
@@ -36,6 +43,7 @@ from .common import (
     SlowInitConfig,
     decode_identification_ascii,
     parse_obd_dtc_pairs,
+    parse_pid_support_bitmap,
     reassemble_identification,
     slow_init_with_retries,
     split_response_frames,
@@ -73,6 +81,12 @@ _NRC_NAMES = {
 VI_PID_VIN = 0x02
 VI_PID_CALIBRATION_ID = 0x04
 VI_PID_ECU_NAME = 0x0A
+
+# Mode 01 PID 01 is the MIL + stored-DTC count: mandatory in J1979 and this
+# ECU's reliable authority on whether faults exist (see CLAUDE.md). It is asked
+# for regardless of the capability bitmap — gating the request that reports the
+# ECU's state on the ECU's own advertisement would be circular.
+PID_STATUS = 0x01
 
 
 @dataclass
@@ -125,6 +139,13 @@ class Iso9141Client:
         # The module this session talks to: the configured address, or the one
         # latched from the first ECU that answers. Reset by connect().
         self._ecu_address: Optional[int] = self.config.ecu_address
+        # What this ECU advertised via Mode 01 PID 00, cached for the session's
+        # lifetime and reset by connect(). None = never successfully read, so
+        # capability is *unknown* (see the supported_pids property).
+        self._supported_pids: Optional[FrozenSet[int]] = None
+        # A keepalive noticing the bitmap has changed says so once, not on every
+        # beat for the rest of the session.
+        self._capability_change_logged = False
 
     # -- helpers -------------------------------------------------------------
     @staticmethod
@@ -196,6 +217,11 @@ class Iso9141Client:
         The handshake and the retry-with-settle loop around it live in
         :func:`slow_init_with_retries` (``common.py``), including the validation
         that rejects a garbled init rather than proceeding on a half-open link.
+
+        Immediately after the handshake the ECU's Mode 01 capability bitmap is
+        read (:meth:`discover_supported_pids`) so every later request can be
+        capability-aware. That read is best-effort: an ECU that won't answer
+        PID 00 still gets a working session, it just has *unknown* capability.
         """
         key = slow_init_with_retries(
             self.transport,
@@ -203,10 +229,17 @@ class Iso9141Client:
             self.config.slow_init,
             log=self._log,
         )
-        # A new session may be a different module: drop any latched address so
-        # it is learned again (a configured one stays pinned).
+        # A new session may be a different module: drop any latched address and
+        # the previous session's capability set so both are learned again (a
+        # configured address stays pinned).
         self._ecu_address = self.config.ecu_address
-        return ConnectionInfo(key_bytes=key, session_started=True)
+        self._supported_pids = None
+        self._capability_change_logged = False
+        return ConnectionInfo(
+            key_bytes=key,
+            session_started=True,
+            supported_pids=self.discover_supported_pids(),
+        )
 
     def stop_communication(self) -> None:
         # ISO 9141 has no explicit stop; the session just times out.
@@ -219,8 +252,117 @@ class Iso9141Client:
         a cheap, read-only Mode 01 PID 00 (supported-PIDs) request — enough
         traffic to avoid the P3 idle timeout. Raises :class:`ProtocolError` if
         the ECU has gone away, so the keepalive ticker can log the loss.
+
+        The beat reuses PID 00 but is **not** a rediscovery: the session's cached
+        capability set is never rebuilt or replaced from a beat, so the poll plan
+        can't quietly change underneath a running stream. A page-0 bitmap that
+        disagrees with the cache is worth knowing about, so it is logged — once
+        per session, since the ticker would otherwise repeat it every beat.
         """
-        self.obd_request(bytes((MODE_CURRENT_DATA, 0x00)))
+        base = PID_SUPPORT_PAGES[0]
+        resp = self.obd_request(bytes((MODE_CURRENT_DATA, base)))
+        cached = self._supported_pids
+        if cached is None or self._capability_change_logged:
+            return  # unknown capability: a keepalive is not the place to learn it
+        try:
+            page = parse_pid_support_bitmap(base, resp[2:])
+        except ProtocolError as exc:
+            self._log.debug(f"keepalive bitmap not parsed (cache kept): {exc}")
+            return
+        if page != {p for p in cached if p <= base + PID_PAGE_SPAN}:
+            self._capability_change_logged = True
+            self._log.warning(
+                "ECU capability page 00 changed mid-session "
+                f"({self._pid_list(page)}); keeping the session's cached set"
+            )
+
+    # -- capability discovery ------------------------------------------------
+    @property
+    def supported_pids(self) -> Optional[FrozenSet[int]]:
+        """PIDs this ECU advertised, or ``None`` when capability is unknown.
+
+        ``None`` and ``frozenset()`` are different answers and must not be
+        collapsed: ``None`` means no usable bitmap was ever read, so nothing may
+        be ruled out; an empty set means the ECU advertised nothing.
+        """
+        return self._supported_pids
+
+    def discover_supported_pids(
+        self, *, refresh: bool = False
+    ) -> Optional[FrozenSet[int]]:
+        """Read the Mode 01 capability bitmap and cache it for the session.
+
+        Requests PID 00 and walks on to PID 20, 40, … **only** while the page
+        just read advertises the next one, so an ECU that stops at one page is
+        asked exactly once. The result is cached until :meth:`connect` (or
+        ``refresh=True``) — later calls cost no traffic.
+
+        Best-effort by design: a missing or malformed bitmap leaves capability
+        unknown (``None``) rather than raising, because "this ECU won't say" must
+        not read as "this ECU supports nothing". A page that fails *after* a good
+        one keeps what was already learned — a partial set is still capability.
+        """
+        if self._supported_pids is not None and not refresh:
+            return self._supported_pids
+        found: Set[int] = set()
+        known = False
+        for base in PID_SUPPORT_PAGES:
+            if base != PID_SUPPORT_PAGES[0] and base not in found:
+                break  # the page before this one did not advertise it
+            try:
+                page = self._read_support_page(base)
+            except ProtocolError as exc:
+                level = self._log.warning if known else self._log.debug
+                level(f"supported-PID page {base:02X} unavailable: {exc}")
+                break
+            found |= page
+            known = True
+        self._supported_pids = frozenset(found) if known else None
+        if known:
+            self._log.debug(
+                f"ECU advertises {len(found)} PID(s): {self._pid_list(found)}"
+            )
+        else:
+            self._log.warning(
+                "ECU did not report its supported PIDs; capability unknown, so "
+                "live requests are not filtered"
+            )
+        return self._supported_pids
+
+    def _read_support_page(self, base: int) -> FrozenSet[int]:
+        """One capability page: ``41 <base> <4 bitmap bytes>`` decoded to PIDs."""
+        resp = self.obd_request(bytes((MODE_CURRENT_DATA, base)))
+        page = parse_pid_support_bitmap(base, resp[2:])
+        self._log.debug(
+            f"supported-PID page {base:02X}: bitmap {self._hex(resp[2:6])} -> "
+            f"{self._pid_list(page)}"
+        )
+        return page
+
+    @staticmethod
+    def _pid_list(pids: Iterable[int]) -> str:
+        return " ".join(f"{p:02X}" for p in sorted(pids)) or "none"
+
+    def live_plan(self, pids: Iterable[int]) -> List[int]:
+        """The requested PIDs this ECU actually advertises, in order.
+
+        The capability filter every live request goes through: with a known
+        capability set, a PID the ECU never advertised is dropped here rather
+        than costing a request and its timeout on the wire. With capability
+        unknown, nothing is dropped — an unfiltered request is the only honest
+        move when the ECU never said what it supports.
+        """
+        supported = self._supported_pids
+        plan: List[int] = []
+        skipped: List[int] = []
+        for pid in pids:
+            (plan if supported is None or pid in supported else skipped).append(pid)
+        if skipped:
+            self._log.debug(
+                f"skipping {len(skipped)} unadvertised PID(s): "
+                f"{self._pid_list(skipped)}"
+            )
+        return plan
 
     # -- OBD request/response ------------------------------------------------
     def obd_request(self, data: bytes, timeout: Optional[float] = None) -> bytes:
@@ -400,7 +542,7 @@ class Iso9141Client:
         malformed reply therefore means the *session is dead*, not that there
         are zero faults — so raise rather than silently return ``(False, 0)``.
         """
-        resp = self.obd_request(bytes((MODE_CURRENT_DATA, 0x01)))
+        resp = self.obd_request(bytes((MODE_CURRENT_DATA, PID_STATUS)))
         if len(resp) < 3:  # mode + PID present already; A is the byte we need
             raise ProtocolError(f"short Mode 01 PID 01 response: {self._hex(resp)}")
         a = resp[2]
@@ -409,14 +551,19 @@ class Iso9141Client:
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
 
-        One Mode 01 request per PID — widely supported and how other live-data
-        tools poll too. A PID the ECU doesn't answer, rejects, or answers with a
+        Capability-aware: the request list is the caller's PIDs filtered through
+        :meth:`live_plan`, so a PID this ECU never advertised costs no request
+        and no timeout. One Mode 01 request per PID after that — widely supported
+        and how other live-data tools poll too.
+
+        An advertised PID the ECU doesn't answer, rejects, or answers with a
         corrupt frame is simply omitted, so a partial dict is normal; the caller
         decodes whatever came back via the PID table. A PID that *is* answered
-        with all-zero or all-``FF`` data is a real answer and is kept.
+        with all-zero or all-``FF`` data is a real answer and is kept — the
+        absence of a key means "no response", never "the response looked empty".
         """
         out: Dict[int, bytes] = {}
-        for pid in pids:
+        for pid in self.live_plan(pids):
             try:
                 resp = self.obd_request(
                     bytes((MODE_CURRENT_DATA, pid)), timeout=self.config.live_timeout

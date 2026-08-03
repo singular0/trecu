@@ -25,18 +25,19 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (167 tests, ~60s, no hardware)
+./.venv/bin/python -m pytest              # full suite (193 tests, ~70s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
 ./.venv/bin/trecu info --mock             # headless ECU identification
 ./.venv/bin/trecu sensors --mock          # headless live-sensor snapshot + exit
+./.venv/bin/trecu pids --mock             # headless PID capability report (advertised/decodable/answered)
 ./.venv/bin/trecu clear --mock -y         # clear, skipping the confirmation prompt
 ./.venv/bin/trecu ports                   # find a real cable's /dev/cu.usbserial-*
 ```
 
 The CLI is a **subcommand** surface (`cli.py:27-86`), not a flag soup: one
-optional positional out of `tui|ports|faults|info|sensors|clear|version|help`,
+optional positional out of `tui|ports|faults|info|sensors|pids|clear|version|help`,
 defaulting to `tui`. `--port`, `--baud`, and `--mock` are
 `argparse.SUPPRESS`-hidden development hooks — the public surface auto-detects
 the cable.
@@ -61,7 +62,16 @@ lives** — bad checksums, foreign modules, wrong modes/PIDs, noise, truncation,
 concatenated frames, echo damage, bad Mode 09 sequences. It scripts raw bytes
 onto the wire (`RawReplyEcu` and friends, local to that file, since
 `MockObdTransport` frames correctly by construction), so put a new negative
-framing case there rather than teaching the shared mock to misbehave.
+framing case there rather than teaching the shared mock to misbehave. Note that
+`connect()` now issues a capability request of its own, so a `RawReplyEcu`
+scripted from an iterator must key its replies on the *request* or discovery
+consumes the first one.
+
+**`tests/test_pid_support.py` owns Mode 01 capability discovery** — the
+byte-exact `41 00 BD 36 91 10` decode, page walking, missing/malformed/partial
+bitmaps, cache reset across reconnects, keepalive not rebuilding the cache, and
+the advertised/answered/decodable split through the service, CLI, and Dashboard.
+Put a new capability case there.
 
 ## Releasing
 
@@ -112,15 +122,44 @@ directly against `Iso9141Client` and calls its members **directly** — no
 `getattr` probes, so a missing method fails loudly rather than being swallowed.
 The surface is `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo,
 status)]`, `read_identification() -> EcuInfo`, `read_live(pids) -> dict[pid,
-data_bytes]`, `clear_dtcs()`, `keepalive()`, `stop_communication()`.
+data_bytes]`, `live_plan(pids) -> list[pid]`, `supported_pids`, `clear_dtcs()`,
+`keepalive()`, `stop_communication()`.
 `read_live()` polls live sensors (Phase 3) with one OBD **Mode 01** request per
 PID, returning *raw* data bytes per requested PID (a PID the ECU doesn't answer
 is simply omitted) — decoding to physical values is the service's job via the
 sensor-decode layer, not the client's. `keepalive()` holds a persistent session
 open (F1): OBD-II has no TesterPresent service, so it pokes the link with a
-cheap read-only Mode 01 PID 00. `read_identification()` is best-effort (OBD
-Mode 09) — a missing reply yields empty fields, not an error, and a field is
-**complete or empty**, never the plausible ASCII half of a VIN.
+cheap read-only Mode 01 PID 00 — the same PID discovery uses, but a beat never
+rebuilds or replaces the cached capability set (a changed page-0 bitmap is
+warned about once, not silently adopted). `read_identification()` is
+best-effort (OBD Mode 09) — a missing reply yields empty fields, not an error,
+and a field is **complete or empty**, never the plausible ASCII half of a VIN.
+
+**Every live request is capability-aware.** `connect()` follows the handshake
+with `discover_supported_pids()`: Mode 01 PID 00's 32-bit bitmap, then pages
+`20`/`40`/… **only** while the page just read advertises the next one (the last
+bit of a page *is* the next page's PID, so `parse_pid_support_bitmap` in
+`common.py` needs no special case for it). The set is cached for the session,
+cleared by `connect()`, and reported on `ConnectionInfo.supported_pids` /
+`client.supported_pids` / `service.supported_pids` / `ReadResult.supported_pids`.
+Discovery is **best-effort**: a missing or malformed bitmap leaves the cache
+`None`, and `None` ≠ `frozenset()` — *unknown* capability filters nothing (an
+ECU that never said must not read as one that said no), while an empty set means
+it advertised nothing. A page that fails after a good one keeps what was learned.
+
+Three states are kept apart everywhere and must never be merged: **advertised**
+by the ECU, **answered** when asked, and **decodable** by this build's PID
+table. `client.live_plan()` applies the first (it owns the capability cache),
+`DiagnosticService._plan` narrows that by the second (it owns the sensor table),
+and only what survives both is put on the wire — which is why the tested bike's
+missing PID `0x42` costs no request and no timeout per poll. `service.
+pid_capabilities(probe=False)` reports all three per PID as `PidStatus`
+(`advertised: bool | None`, `decodable`, `answered: bool | None`, plus the raw
+bytes); `probe=True` asks the advertised PIDs once so `answered` is a fact.
+A PID answering `00`/`FF` **answered** — absence of a reply is the only thing
+that makes `answered` False. `trecu pids` is that report as a table, and the
+TUI's Connection card carries advertised/decodable counts while the Live Data
+table is the record of what answered.
 
 **Nothing reaches a decoder unvalidated.** Every response goes through one seam
 — `Iso9141Client._exchange` — which collects raw bytes, splits them into whole
@@ -154,7 +193,11 @@ PID 01 stay at one collect.
 **`protocol/common.py` is the home of the shared vocabulary** — everything that
 sits *below* the OBD service layer: `ProtocolError`, `ConnectionInfo`, `EcuInfo`,
 `decode_identification_ascii`, `parse_obd_dtc_pairs` +
-`STATUS_CONFIRMED`/`STATUS_PENDING` for Mode 03/07 responses, the data-link
+`STATUS_CONFIRMED`/`STATUS_PENDING` for Mode 03/07 responses,
+`parse_pid_support_bitmap` + `PID_SUPPORT_PAGES`/`PID_PAGE_SPAN` for Mode 01
+capability pages (and `encode_pid_support_pages`, its inverse, which builds the
+bitmaps mock ECUs advertise — the same mock/decoder symmetry `_mock_live.py` has
+with the sensor formulas), the data-link
 framing (`split_response_frames` → `ObdFrame`s + leftover junk, `MAX_DATA_BYTES`,
 and `reassemble_identification` for numbered Mode 09 fragments), and the whole
 5-baud slow init (`slow_init_handshake`, the validated one-shot handshake;
@@ -244,8 +287,23 @@ specifies). It also serves
 VIN/calibration strings are invented, not real-bike facts — and answers
 **live-data** requests (Phase 3) with plausible, *moving* values from
 `transport/_mock_live.py`, whose encoders are the inverse of the
-`obd_sensors.json` formulas; keep the two in sync. An unmodelled PID gets no
-reply, so `read_live` omits it.
+`obd_sensors.json` formulas; keep the two in sync.
+
+**Its capability bitmap is the bike's, byte for byte**: Mode 01 PID 00 answers
+`41 00 BD 36 91 10` (`_DEFAULT_SUPPORT_PAGES`), the observed reply — 14 PIDs, no
+continuation page, and notably **no `0x33` or `0x42`**, which is why the default
+live set loses battery voltage against this mock. A PID outside that bitmap gets
+no reply at all (a real ECU doesn't answer for capability it never claimed), and
+`supported_pids` is a *property* derived from `support_pages` so the two can't
+drift when a test rewrites the bitmap mid-session. `support_pages=` (built with
+`encode_pid_support_pages`) gives an ECU that advertises something else — that
+is how the multi-page walk is tested. Because it models values for only *some*
+advertised PIDs, one mock reproduces all three states: advertised-and-answered,
+advertised-but-silent, and never-advertised. `requests` records every OBD request
+payload it received, so a test asserts what the tester *asked* rather than
+inferring it from the answers. Mode 01 PID 01 is answered whatever the bitmap
+says, matching the client, which never gates the DTC authority on the ECU's own
+advertisement.
 
 **DTC decoding (`protocol/dtc.py`) has one labelling scheme.**
 `decode_dtc_bytes(hi, lo)` is the structural SAE J2012 decode: `P/C/B/U` from
@@ -276,10 +334,12 @@ loaded into `PidDatabase` as `{int pid -> PidDef}`. (There used to be a second,
 community-reverse-engineered Keihin channel table decoded from one packed frame,
 with a `_SensorTable` base and a `frame_offset` field to share the load/lookup
 half between them — all removed with the KWP path.)
-`DiagnosticService.read_live(pids=None)` runs the client's `read_live` under
-`_io_lock`, then decodes outside the lock into ordered `SensorReading`s
-(dropping any PID the ECU didn't answer or the table can't decode); `None`
-means `DEFAULT_LIVE_PIDS`.
+`DiagnosticService.read_live(pids=None)` builds the poll plan (`_plan`: the
+client's capability filter, then this table's), runs the client's `read_live`
+under `_io_lock`, then decodes outside the lock into ordered `SensorReading`s
+(dropping any planned PID the ECU didn't answer this snapshot); `None` means
+`DEFAULT_LIVE_PIDS`, which is a *wish list* — the plan is what reaches the wire,
+so `live_plan()` is the honest answer to "what is being polled".
 
 **TUI layout (`tui/app.py`) uses Textual's one-row `Header` title bar over a
 `TabbedContent` body.** The title bar shows the app name and version together
@@ -291,8 +351,9 @@ indicator** — `_mark_faults_tab` toggles a `-has-faults` class (CSS `color:
 $error; text-style: bold`) on the tab so its label turns red whenever the last
 read found stored codes (there is no separate MIL lamp in the title bar). The
 body has four
-tabs: **Dashboard** (three summary `Static` cards — Faults, Connection, ECU
-identity), **Faults** (the DTC `DataTable`, always visible — with no codes it
+tabs: **Dashboard** (three summary `Static` cards — Faults, Connection —
+mode/port/protocol plus `_sensor_summary`'s "N advertised · M decodable" PID
+capability line — and ECU identity), **Faults** (the DTC `DataTable`, always visible — with no codes it
 just shows its column headers and no rows; the "no faults" wording lives on the
 Dashboard's Faults card, not a separate widget swap), **Live Data** (the Phase 3
 streaming table — sensor / value / unit / running min / max / trend
@@ -463,13 +524,19 @@ decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
    bytes; the tester answers with the inverted key byte and the ECU returns the
    inverted address. The client **requires** that inverted-address byte to
    accept the session (a garbled 5-baud frame otherwise looks "connected").
-2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name), each
+2. **Mode 01 PID 00** → the supported-PID bitmap, read immediately after the
+   handshake, then PID `20`/`40`/… only while the previous page's last bit
+   advertises the next. The set is cached for the session and every later live
+   request is filtered through it; a missing/garbled bitmap leaves capability
+   unknown, which filters nothing.
+3. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name), each
    reassembled from its numbered `49 <pid> <seq> <4 bytes>` fragments.
-3. **Mode 01 PID 01** → MIL status + DTC count (the reliable authority), read
-   *first*; then **Mode 03** (`68 6A F1 03`) → stored DTCs (retried and
-   reconciled against the count, three pairs per frame); **Mode 07** → pending
-   (best-effort).
-4. **Mode 01** per PID → live sensor data (Phase 3); **Mode 04** → clear codes.
+4. **Mode 01 PID 01** → MIL status + DTC count (the reliable authority; asked
+   for whatever the bitmap says), read *first*; then **Mode 03**
+   (`68 6A F1 03`) → stored DTCs (retried and reconciled against the count,
+   three pairs per frame); **Mode 07** → pending (best-effort).
+5. **Mode 01** per advertised PID → live sensor data (Phase 3); **Mode 04** →
+   clear codes.
 
 Every response frame is `48 6B <ecu> <mode+0x40> <data…> <cs>`, at most
 `MAX_DATA_BYTES` (7) of data field, and is validated on all of those before it
