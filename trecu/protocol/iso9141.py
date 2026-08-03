@@ -18,7 +18,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
-from .kwp2000 import (
+from .common import (
     STATUS_CONFIRMED,
     STATUS_PENDING,
     ConnectionInfo,
@@ -61,8 +61,8 @@ class Iso9141Config:
     pending_timeout: float = 0.3           # shorter wait for optional Mode 07
     quiet_gap: float = 0.05                # end-of-message idle gap
     request_gap: float = 0.06              # min idle between requests (P3)
-    # 5-baud handshake timing + retry policy; the same section Kwp2000Config
-    # carries, because it is the same handshake (see SlowInitConfig).
+    # 5-baud handshake timing + retry policy (see SlowInitConfig): the
+    # physical-layer wake-up, kept apart from these J1979 service timings.
     slow_init: SlowInitConfig = field(default_factory=SlowInitConfig)
     id_timeout: float = 0.5                # per-PID wait for Mode 09 (often unsupported)
     live_timeout: float = 0.4              # per-PID wait when polling Mode 01 live data
@@ -71,14 +71,11 @@ class Iso9141Config:
 
 
 class Iso9141Client:
-    """5-baud init + OBD-II client. Same method surface as Kwp2000Client."""
+    """5-baud init + OBD-II client: the one protocol client TrECU speaks.
 
-    # OBD Mode 03/07 responses are SAE-J2012 bit-encoded: decode structurally
-    # (duck-type parity with Kwp2000Client.dtc_family).
-    dtc_family: Optional[str] = None
-    # Live data is one Mode 01 request per standardized PID (vs. the KWP
-    # path's single packed kwp_local frame).
-    live_source = "obd_mode01"
+    Everything the service needs from a client lives here — connect, read DTCs,
+    read identification, poll live data, clear, keepalive, stop.
+    """
 
     def __init__(
         self,
@@ -114,10 +111,9 @@ class Iso9141Client:
     def connect(self) -> ConnectionInfo:
         """5-baud init at ``config.init_address``; the key bytes open the session.
 
-        Both the handshake and the retry-with-settle loop around it are shared
-        with the KWP slow-init path (:func:`slow_init_with_retries`, see
-        ``kwp2000.py``), including the validation that rejects a garbled init
-        rather than proceeding on a half-open link.
+        The handshake and the retry-with-settle loop around it live in
+        :func:`slow_init_with_retries` (``common.py``), including the validation
+        that rejects a garbled init rather than proceeding on a half-open link.
         """
         key = slow_init_with_retries(
             self.transport,
@@ -134,11 +130,10 @@ class Iso9141Client:
     def keepalive(self) -> None:
         """Keep the ISO 9141-2 link alive between operations.
 
-        Duck-typed peer of :meth:`Kwp2000Client.keepalive`. OBD-II / ISO 9141-2
-        have no TesterPresent service, so poke the link with a cheap, read-only
-        Mode 01 PID 00 (supported-PIDs) request — enough traffic to avoid the P3
-        idle timeout. Raises :class:`ProtocolError` if the ECU has gone away, so
-        the keepalive ticker can log the loss.
+        OBD-II / ISO 9141-2 have no TesterPresent service, so poke the link with
+        a cheap, read-only Mode 01 PID 00 (supported-PIDs) request — enough
+        traffic to avoid the P3 idle timeout. Raises :class:`ProtocolError` if
+        the ECU has gone away, so the keepalive ticker can log the loss.
         """
         self.obd_request(bytes((MODE_CURRENT_DATA, 0x00)))
 
@@ -224,8 +219,7 @@ class Iso9141Client:
         One Mode 01 request per PID — widely supported and how other live-data
         tools poll too. A PID the ECU doesn't answer (timeout, wrong echo) is
         simply omitted, so a partial dict is normal; the caller decodes whatever
-        came back via the shared PID table. Duck-typed peer of
-        :meth:`Kwp2000Client.read_live`.
+        came back via the PID table.
         """
         out: Dict[int, bytes] = {}
         for pid in pids:

@@ -12,7 +12,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
 authors = [{ name = "Denis Yantarev", email = "denis.yantarev@gmail.com" }]
-keywords = ["triumph", "motorcycle", "ecu", "kwp2000", "obd", "kkl", "ftdi", "diagnostics"]
+keywords = ["triumph", "motorcycle", "ecu", "iso9141", "obd", "kkl", "ftdi", "diagnostics"]
 
 # Kept intentionally small and to well-maintained libraries only.
 dependencies = [

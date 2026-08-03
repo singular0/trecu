@@ -4,8 +4,9 @@ The suite never touches hardware (see `CLAUDE.md`), so every connect in it runs
 against one of the bundled mock transports.  These are the variants more than
 one test file needs — a mock that counts its closes, one whose 5-baud init
 stalls on a gate so a test can observe an attempt mid-flight and cancel it, and
-one whose init always fails — plus the fail-fast config that keeps a
-deliberately-failing connect from spending the real retry budget.
+one whose init always fails, and a bare byte pipe that cannot slow-init at all —
+plus the fail-fast config that keeps a deliberately-failing connect from
+spending the real retry budget.
 
 Not a ``test_*.py`` module, so pytest imports it only when a test asks for it.
 """
@@ -16,8 +17,8 @@ import threading
 from typing import Dict, List
 
 from trecu.protocol.iso9141 import Iso9141Config
-from trecu.protocol.kwp2000 import SlowInitConfig
-from trecu.transport.base import TransportError
+from trecu.protocol.common import SlowInitConfig
+from trecu.transport.base import Transport, TransportError
 from trecu.transport.mock_obd import MockObdTransport
 
 #: One attempt, no settle wait — a connect expected to fail gives up at once
@@ -51,10 +52,9 @@ class GatedObdTransport(CountingObdTransport):
     """Mock ECU whose 5-baud init blocks until ``gate`` is released.
 
     The stall sits inside ``five_baud_init``, i.e. within ``client.connect()``
-    and *after* the service has reported which protocol it is probing — so a
-    test can inspect the connecting modal's port/protocol lines, then either
-    release the gate (the connect succeeds) or leave it stalled (to exercise
-    Cancel against an attempt that is genuinely still running).
+    — so a test can inspect the connecting modal while an attempt is genuinely
+    in flight, then either release the gate (the connect succeeds) or leave it
+    stalled (to exercise Cancel against an attempt that is still running).
     """
 
     def __init__(self, gate: threading.Event, **kw):
@@ -71,3 +71,23 @@ class FailingObdTransport(CountingObdTransport):
 
     def five_baud_init(self, address: int) -> None:
         raise TransportError("simulated 5-baud init failure")
+
+
+class BytePipeOnly(Transport):
+    """The minimum a concrete transport must define: the byte pipe, no init.
+
+    ``supports_slow_init`` stays at the base default of False, so this doubles
+    as the "transport that cannot do the init" case the protocol layer must
+    refuse up front rather than retry against.
+    """
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def reset_input(self) -> None: ...
+
+    def write(self, data: bytes) -> None: ...
+
+    def read(self, count: int, timeout: float) -> bytes:
+        return b""

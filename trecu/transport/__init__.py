@@ -2,12 +2,10 @@
 
 from .base import Transport, TransportError
 from .serial_kline import KLineSerialTransport, list_serial_ports
-from .mock_kline import MockKLineTransport
 
 __all__ = [
     "Transport",
     "TransportError",
     "KLineSerialTransport",
-    "MockKLineTransport",
     "list_serial_ports",
 ]

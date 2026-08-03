@@ -58,17 +58,14 @@ def wait_for():
 def mock_app():
     """Build a ``TrecuApp`` on a fixed mock ECU — no port picker.
 
-    The defaults are what a TUI test almost always wants: the simulated port,
-    the confirmed ``iso9141`` path (so the test does not pay for the auto
-    sweep's failing candidates), and no keepalive ticker beating underneath the
-    assertions.  Any of them, and every other ``TrecuApp`` argument, can be
-    overridden per test.
+    The defaults are what a TUI test almost always wants: the simulated port
+    and no keepalive ticker beating underneath the assertions.  Either, and
+    every other ``TrecuApp`` argument, can be overridden per test.
     """
 
     def build(transport_factory=MockObdTransport, **kw) -> TrecuApp:
         kw.setdefault("mock", True)
         kw.setdefault("port", "mock")
-        kw.setdefault("protocol", "iso9141")
         kw.setdefault("keepalive_interval", 0)
         return TrecuApp(transport_factory=transport_factory, **kw)
 
@@ -80,9 +77,7 @@ def picker_app():
     """Build a ``TrecuApp`` with no port known yet, so it opens the picker.
 
     ``transport_for_port`` is what the picked device turns into; ``list_ports``
-    defaults to the two mock cables in ``mock_ecus.TWO_PORTS``.  The protocol is
-    deliberately *not* defaulted here — which mock a test hands back decides
-    whether it wants the sweep or a named path.
+    defaults to the two mock cables in ``mock_ecus.TWO_PORTS``.
     """
 
     def build(

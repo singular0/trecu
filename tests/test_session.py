@@ -1,7 +1,7 @@
-"""F1 — persistent session + TesterPresent keepalive.
+"""F1 — persistent session + keepalive.
 
 Covers the DiagnosticService.session() lifecycle, the keepalive ticker, the
-half-duplex serialization guarantee, both clients' keepalive() methods, and the
+half-duplex serialization guarantee, the client's keepalive() method, and the
 TUI reusing one long-lived session across reads.
 """
 
@@ -11,35 +11,26 @@ import time
 
 import pytest
 
+from trecu.protocol.common import ConnectionInfo, EcuInfo, ProtocolError
 from trecu.protocol.iso9141 import Iso9141Client
-from trecu.protocol.kwp2000 import (
-    ConnectionInfo,
-    EcuClient,
-    EcuInfo,
-    Kwp2000Client,
-    ProtocolError,
-)
 from trecu.service import DiagnosticService, as_transport_factory
-from trecu.transport.mock_kline import MockKLineTransport
 from trecu.transport.mock_obd import MockObdTransport
+
+from mock_ecus import FAIL_FAST, FailingObdTransport
 
 
 class SpyClient:
-    """Duck-typed protocol client that counts what the service asks of it.
+    """Stand-in protocol client that counts what the service asks of it.
 
-    Implements the whole :class:`EcuClient` contract (asserted below) — the
-    service calls those members unguarded, so a spy that drifts from it would
-    fail as an AttributeError rather than a readable assertion.
+    Implements every member the service calls on a client. Those calls are
+    unguarded, so a spy that drifts from the real client's surface fails as an
+    AttributeError rather than a readable assertion.
     """
-
-    dtc_family = None  # structural J2012 decode, like the real clients' default
-    live_source = "obd_mode01"
 
     def __init__(self):
         self.connects = 0
         self.reads = 0
         self.keepalives = 0
-        self.session_stops = 0
         self.stops = 0
         self.shutdown_order = []
 
@@ -63,10 +54,6 @@ class SpyClient:
     def keepalive(self) -> None:
         self.keepalives += 1
 
-    def stop_diagnostic_session(self) -> None:
-        self.session_stops += 1
-        self.shutdown_order.append("session")
-
     def stop_communication(self) -> None:
         self.stops += 1
         self.shutdown_order.append("communication")
@@ -74,11 +61,7 @@ class SpyClient:
 
 def _spy_service(spy: SpyClient) -> DiagnosticService:
     # The transport is inert here — the spy client ignores it entirely.
-    return DiagnosticService(MockKLineTransport(), client=spy)
-
-
-def test_spy_client_matches_the_real_client_contract():
-    assert isinstance(SpyClient(), EcuClient)
+    return DiagnosticService(MockObdTransport(), client=spy)
 
 
 # -- session lifecycle -------------------------------------------------------
@@ -90,9 +73,8 @@ def test_session_connects_once_and_reuses_across_operations():
         svc.clear_faults()
     assert spy.connects == 1          # connected once; the connection persists
     assert spy.reads == 2
-    assert spy.session_stops == 1     # leave the explicitly started diag session
     assert spy.stops == 1             # stop_communication on close
-    assert spy.shutdown_order == ["session", "communication"]
+    assert spy.shutdown_order == ["communication"]
     assert [d.code for d in r1.dtcs] == ["P0107"]
     assert r2.count == 1
 
@@ -110,7 +92,6 @@ def test_service_can_reconnect_after_close():
         assert svc.read_faults().count == 1
 
     assert spy.connects == 2
-    assert spy.session_stops == 2
     assert spy.stops == 2
 
 
@@ -124,7 +105,7 @@ def test_reconnect_after_close_builds_a_fresh_transport():
         built.append(t)
         return t
 
-    svc = DiagnosticService(factory, protocol="iso9141")
+    svc = DiagnosticService(factory)
     with svc.session(keepalive_interval=0):
         assert svc.read_faults().count == 1
         assert svc.transport is built[0]
@@ -139,7 +120,7 @@ def test_reconnect_after_close_builds_a_fresh_transport():
 def test_a_transport_instance_binds_one_device_for_every_session():
     """Handing over an instance pins it — the ``--mock`` TUI's shared ECU."""
     transport = MockObdTransport()
-    svc = DiagnosticService(transport, protocol="iso9141")
+    svc = DiagnosticService(transport)
     with svc.session(keepalive_interval=0):
         svc.clear_faults()
     # A second session over the same device still sees the cleared ECU, the way
@@ -151,7 +132,7 @@ def test_a_transport_instance_binds_one_device_for_every_session():
 
 def test_a_service_that_never_opens_never_builds_a_device():
     svc = DiagnosticService(
-        lambda: pytest.fail("the factory must not be called"), protocol="iso9141"
+        lambda: pytest.fail("the factory must not be called")
     )
     svc.close()
     assert svc.transport is None
@@ -160,20 +141,6 @@ def test_a_service_that_never_opens_never_builds_a_device():
 def test_as_transport_factory_rejects_a_non_transport():
     with pytest.raises(TypeError):
         as_transport_factory("/dev/cu.usbserial-3")
-
-
-def test_kwp_close_returns_to_default_session_then_disconnects():
-    transport = MockKLineTransport()
-    svc = DiagnosticService(transport, protocol="kwp-fast")
-    svc.start_session(keepalive_interval=0)
-    assert transport.diagnostic_session == 0x02
-    assert transport._connected is True
-
-    svc.close()
-
-    assert transport.diagnostic_session == 0x81
-    assert transport._connected is False
-    assert transport._open is False
 
 
 def test_close_waits_for_in_flight_io_before_shutdown():
@@ -203,16 +170,17 @@ def test_close_waits_for_in_flight_io_before_shutdown():
     closer.join(timeout=2)
     assert not reader.is_alive()
     assert not closer.is_alive()
-    assert spy.shutdown_order == ["session", "communication"]
+    assert spy.shutdown_order == ["communication"]
 
 
 def test_start_session_connect_failure_closes_transport():
-    # iso9141 refuses a transport that can't do 5-baud init, so connect fails.
-    t = MockKLineTransport()  # supports_slow_init is False
-    svc = DiagnosticService(t, protocol="iso9141")
+    # The 5-baud init fails on every attempt, so connect() gives up and raises.
+    t = FailingObdTransport()
+    svc = DiagnosticService(t, FAIL_FAST)
     with pytest.raises(ProtocolError):
         svc.start_session(keepalive_interval=0)
-    assert t._open is False           # transport released despite the failure
+    assert t.closes >= 1              # transport released despite the failure
+    assert svc.transport is None      # ... and the device dropped with it
     assert svc._keepalive is None     # no ticker left dangling
 
 
@@ -289,7 +257,7 @@ def test_keepalive_failure_is_logged_not_fatal():
             raise ProtocolError("boom")
 
     svc = DiagnosticService(
-        MockKLineTransport(), client=Flaky(), logger=logs.append
+        MockObdTransport(), client=Flaky(), logger=logs.append
     )
     svc.start_session(keepalive_interval=0.02)
     try:
@@ -302,17 +270,6 @@ def test_keepalive_failure_is_logged_not_fatal():
 
 
 # -- client keepalive methods ------------------------------------------------
-def test_kwp_keepalive_sends_tester_present():
-    t = MockKLineTransport()
-    t.open()
-    client = Kwp2000Client(t)
-    client.start_communication()
-    client.keepalive()               # TesterPresent, response suppressed
-    # Session still works afterwards.
-    assert client.read_dtcs()
-    t.close()
-
-
 def test_iso9141_keepalive_pokes_link():
     t = MockObdTransport()
     t.open()
@@ -324,24 +281,24 @@ def test_iso9141_keepalive_pokes_link():
 
 
 # -- TUI owns one long-lived session -----------------------------------------
-def test_tui_reuses_one_session_across_reads(mock_app):
+def test_tui_reuses_one_session_across_reads(mock_app, wait_for):
     builds = {"n": 0}
 
     def factory():
         builds["n"] += 1
-        return MockKLineTransport()
+        return MockObdTransport()
 
-    # The KWP mock needs the auto sweep (it refuses both slow inits), unlike
-    # the fixture's iso9141 default.
-    app = mock_app(factory, protocol="auto")
+    app = mock_app(factory)
+
+    table_rows = lambda: app.query_one("#dtcs").row_count  # noqa: E731
 
     async def scenario():
         async with app.run_test() as pilot:
-            await pilot.pause(0.3)    # auto-read on mount builds the session
-            await pilot.press("r")    # re-read reuses it
-            await pilot.pause(0.3)
-            assert app.query_one("#dtcs").row_count == 3
-            assert app._ecu.connected
+            # Auto-read on mount builds the session; the re-read reuses it.
+            await wait_for(lambda: table_rows() == 1, pilot.pause)
+            await pilot.press("r")
+            await wait_for(lambda: app._ecu.connected, pilot.pause)
+            assert table_rows() == 1  # the default P1108
 
     asyncio.run(scenario())
     assert builds["n"] == 1           # transport built once -> one session

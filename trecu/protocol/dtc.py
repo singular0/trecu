@@ -11,8 +11,8 @@ from typing import Iterable, Optional
 # First two bits of the high byte select the code's letter (SAE J2012).
 _DTC_LETTERS = ("P", "C", "B", "U")
 
-# ISO 14229-1 statusOfDTC bit meanings. KWP2000 ECUs vary, but this mask is the
-# most widely documented reference; treat it as a hint, not gospel, for a given
+# ISO 14229-1 statusOfDTC bit meanings. ECUs vary, but this mask is the most
+# widely documented reference; treat it as a hint, not gospel, for a given
 # Triumph ECU. Bit -> short label.
 _STATUS_BITS = {
     0x01: "testFailed",
@@ -26,22 +26,13 @@ _STATUS_BITS = {
 }
 
 
-def decode_dtc_bytes(high: int, low: int, family: str | None = None) -> str:
+def decode_dtc_bytes(high: int, low: int) -> str:
     """Convert a two-byte DTC into its letter + four hex digits form.
 
-    ``family=None`` (the SAE J2012 structural decode): the top two bits of the
-    high byte select ``P/C/B/U``, e.g. ``0x01 0x07`` -> ``"P0107"``. This is
-    correct for OBD Mode 03/07 responses (and Mode 03 carried over KWP).
-
-    ``family="K"`` (or another letter): the bytes are a *raw* fault number that
-    is not J2012 bit-encoded — Keihin ECUs answering KWP ``0x18``
-    ReadDTCByStatus return these — so the given letter is prepended to the four
-    raw hex digits, e.g. ``0x15 0x35`` -> ``"K1535"`` (the community labelling
-    convention: the family comes from which ECU/service answered, not from
-    the bytes).
+    The SAE J2012 structural decode: the top two bits of the high byte select
+    ``P/C/B/U``, e.g. ``0x01 0x07`` -> ``"P0107"``. This is how OBD Mode 03/07
+    responses encode a code, and it is the only scheme TrECU reads.
     """
-    if family is not None:
-        return f"{family}{high:02X}{low:02X}"
     letter = _DTC_LETTERS[(high >> 6) & 0x03]
     d1 = (high >> 4) & 0x03
     d2 = high & 0x0F
@@ -51,12 +42,12 @@ def decode_dtc_bytes(high: int, low: int, family: str | None = None) -> str:
 
 
 def encode_dtc_code(code: str) -> tuple[int, int]:
-    """Inverse of :func:`decode_dtc_bytes` for the structural (``family=None``) scheme.
+    """Inverse of :func:`decode_dtc_bytes`.
 
     ``"P1108"`` -> ``(0x11, 0x08)``. Only SAE J2012 ``P/C/B/U`` codes whose first
-    digit is ``0-3`` round-trip; anything else (a ``K``/``L`` family code, a
-    first digit above 3, non-hex digits, wrong length) has no byte pair that
-    decodes back to it, and raises :class:`ValueError`.
+    digit is ``0-3`` round-trip; anything else (a first digit above 3, non-hex
+    digits, wrong length) has no byte pair that decodes back to it, and raises
+    :class:`ValueError`.
     """
     if len(code) != 5:
         raise ValueError(f"not a 4-digit DTC: {code!r}")
@@ -106,7 +97,8 @@ class DtcDatabase:
 
     Backed by ``trecu/data/triumph_dtc.json`` — a flat ``{code: description}``
     map imported from the official-service-manual wording in a community-sourced
-    extract (557 codes across the ``P``/``K``/``C``/``U``/``L`` families).
+    extract (415 codes across the ``P``/``C``/``U`` families — every code an
+    OBD Mode 03/07 response can structurally decode to).
     Descriptions may vary by model/year — the file is meant to be extended.
     """
 
@@ -131,10 +123,8 @@ class DtcDatabase:
             return "Unknown code — consult the model service manual"
         return entry
 
-    def make_dtc(
-        self, high: int, low: int, status: int, raw: bytes = b"", family: str | None = None
-    ) -> Dtc:
-        code = decode_dtc_bytes(high, low, family)
+    def make_dtc(self, high: int, low: int, status: int, raw: bytes = b"") -> Dtc:
+        code = decode_dtc_bytes(high, low)
         return Dtc(code=code, status=status, description=self.describe(code), raw=raw)
 
     def _structural_codes_by_family(self) -> dict[str, list[str]]:
@@ -190,13 +180,6 @@ class DtcDatabase:
                 chosen.append(code)
         return [encode_dtc_code(code) for code in chosen]
 
-    def decode_all(
-        self, triples: Iterable[tuple[int, int, int]], family: str | None = None
-    ) -> list[Dtc]:
-        """Decode ``(high, low, status)`` DTC triples.
-
-        ``family`` selects the labelling scheme (see :func:`decode_dtc_bytes`):
-        ``None`` for the structural SAE J2012 decode, a letter (e.g. ``"K"``)
-        when the source service returns raw non-J2012 fault numbers.
-        """
-        return [self.make_dtc(h, l, s, bytes((h, l, s)), family) for (h, l, s) in triples]
+    def decode_all(self, triples: Iterable[tuple[int, int, int]]) -> list[Dtc]:
+        """Decode ``(high, low, status)`` DTC triples via :func:`decode_dtc_bytes`."""
+        return [self.make_dtc(h, l, s, bytes((h, l, s))) for (h, l, s) in triples]

@@ -1,15 +1,12 @@
-"""Synthetic, *moving* live-sensor values shared by both mock ECUs.
+"""Synthetic, *moving* live-sensor values for the mock ECU.
 
-The mocks answer live-data requests with plausible values that visibly change,
-or the live view looks dead. Both mock ECUs encode
-the same sensor set the same way — so the two protocol paths behave alike in
-tests — and this module is that single source of truth.
+The mock answers live-data requests with plausible values that visibly change,
+or the live view looks dead.
 
 Values are deterministic functions of a ``tick`` counter (a smooth sine wobble
 around a realistic base), so tests can assert ranges and movement without
-wall-clock flakiness. Each encoder is the **inverse** of the decode formula in
-the matching ``trecu/data/`` table (``obd_sensors.json`` for the OBD sensors,
-``keihin_sensors.json`` for the Keihin channels) — keep the two in sync (this
+wall-clock flakiness. Each encoder is the **inverse** of the decode formula for
+that PID in ``trecu/data/obd_sensors.json`` — keep the two in sync (this
 mirrors the DTC mock/DB sync note in ``CLAUDE.md``).
 """
 
@@ -47,33 +44,6 @@ _SENSORS: Dict[int, Tuple[float, float, float, Callable[[float], bytes]]] = {
     0x33: (101.0, 1.5, 0.02, lambda k: _u8(k)),            # barometric pressure kPa
     0x42: (13.8, 0.4, 0.06, lambda v: _u16(v * 1000)),     # battery voltage V
 }
-
-
-# Keihin packed live frame (kwp_local, the KWP path): the Keihin
-# MODE_READ_SENSORS RLI (21 80) answers with *every* channel in one frame. Slot
-# positions and encoders here are the inverse of the draft kwp_local
-# layout/formulas in ``keihin_sensors.json`` (sequential 2-byte big-endian slots
-# in listed order) — keep the two in sync. Unmodelled slots stay zero, which
-# still decodes (to the channel's offset), like a quiescent sensor.
-_KWP_FRAME_SLOTS = 53
-# frame slot -> (base, amplitude, angular freq, physical value -> raw count).
-_KWP_CHANNELS: Dict[int, Tuple[float, float, float, Callable[[float], float]]] = {
-    0: (1300.0, 180.0, 0.09, lambda rpm: rpm),       # ch 0  RPM
-    1: (5.0, 3.0, 0.13, lambda pct: pct * 10),       # ch 1  TPS (0.1 %)
-    3: (90.0, 4.0, 0.05, lambda t: t + 25),          # ch 3  water temp (-25 offset)
-    5: (3.0, 2.0, 0.04, lambda gear: gear),          # ch 5  gear
-    15: (0.0, 0.0, 0.0, lambda mil: mil + 1),        # ch 17 MIL flag (-1 offset)
-    25: (13.8, 0.4, 0.06, lambda v: (v - 8) * 10),   # ch 50 battery (+8 V, 0.1 V)
-}
-
-
-def kwp_live_frame(tick: int) -> bytes:
-    """The packed ``21 80`` response body a mock Keihin serves at ``tick``."""
-    frame = bytearray(2 * _KWP_FRAME_SLOTS)
-    for slot, (base, amplitude, freq, to_raw) in _KWP_CHANNELS.items():
-        raw = _u16(to_raw(base + amplitude * math.sin(tick * freq)))
-        frame[2 * slot : 2 * slot + 2] = raw
-    return bytes(frame)
 
 
 def sensor_data(pid: int, tick: int) -> Optional[bytes]:

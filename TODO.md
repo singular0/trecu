@@ -7,7 +7,8 @@ turned into a replay fixture and a byte-exact test.
 
 TrECU's target is now deliberately narrow: reliable, read-oriented diagnostics
 for the tested 2009 Triumph Bonneville 865 Keihin ECU over its confirmed
-ISO 9141-2 / OBD-II endpoint. KWP2000, enhanced manufacturer diagnostics, ABS,
+ISO 9141-2 / OBD-II endpoint. The KWP2000/Keihin path has been removed outright
+(it was never validated on a bike). Enhanced manufacturer diagnostics, ABS,
 actuator control, map access, and reflashing are outside the project scope.
 
 Priority key: **P0** correctness/release safety, **P1** validated read-only
@@ -29,34 +30,7 @@ capability, **P2** user-facing diagnostics.
      local mock suite completes in a few seconds rather than spending most of
      its time in configured retry sleeps.
 
-2. **P0 — Remove the KWP2000 path and make the product explicitly ISO-only.**
-
-   - Remove `kwp-slow`, `kwp-fast`, and `auto` protocol selection from the
-     service, CLI, TUI, connection progress, configuration, help text, and
-     documentation. Remove `--ecu-address` and `--tester-address`; retain the
-     ISO init-address and timeout overrides.
-   - Delete the KWP client, KWP framing implementation, KWP transport mock,
-     KWP-only tests, `keihin_sensors.json`, the speculative packed `21 80`
-     decoder, `KwpLocalTable`, `live_source`, and `PidDef.frame_offset`.
-   - Move the genuinely shared vocabulary currently housed in `kwp2000.py`
-     (`ProtocolError`, `ConnectionInfo`, `EcuInfo`, slow-init configuration and
-     helpers, and OBD DTC-pair parsing) into a small neutral ISO/common module.
-     Remove the multi-client `EcuClient` abstraction if it no longer provides a
-     useful boundary with only one concrete protocol client.
-   - Collapse `EcuConfig` and `DiagnosticService` to one ISO configuration and
-     one client construction path. Preserve the transport factory, serialized
-     I/O lock, persistent session, and keepalive lifecycle.
-   - Remove the KWP SecurityAccess, enhanced clear-DTC, actuator, map backup,
-     reflash, and throttle-synchronization roadmap promises rather than leaving
-     dead features implied in comments or documentation.
-   - State the supported boundary consistently: engine-ECU ISO 9141-2 / OBD-II
-     diagnostics only; no CAN modules, ABS, manufacturer service functions,
-     tuning, or programming.
-   - **Done when:** no production import, CLI option, data file, mock, or test
-     implements a KWP path, no user-facing claim offers one, and the complete
-     ISO-only suite passes.
-
-3. **P0 — Harden ISO 9141 response parsing.**
+2. **P0 — Harden ISO 9141 response parsing.**
 
    - Reject bad response checksums instead of warning and decoding possibly
      corrupt bytes.
@@ -79,7 +53,7 @@ capability, **P2** user-facing diagnostics.
    - **Done when:** corrupt, misaddressed, incomplete, or unrelated traffic
      cannot surface as an ECU identity, DTC, or sensor reading.
 
-4. **P0 — Add Mode `01` PID auto-detection after connection.**
+3. **P0 — Add Mode `01` PID auto-detection after connection.**
 
    - Immediately after the slow-init handshake, request Mode `01` PID `00` and
      parse its 32-bit support bitmap. Follow PID pages `20`, `40`, `60`, etc.
@@ -104,7 +78,7 @@ capability, **P2** user-facing diagnostics.
      no timeout to a poll, and advertised/answered/decoded states cannot be
      confused.
 
-5. **P1 — Capture and replay the complete non-destructive ISO path.**
+4. **P1 — Capture and replay the complete non-destructive ISO path.**
 
    - Record sanitized raw traces for slow init at `0x33`, including a clean
      `55 08 08` / inverted-address handshake and representative garbled or
@@ -124,7 +98,7 @@ capability, **P2** user-facing diagnostics.
    - **Done when:** the full ISO read-only sequence replays without hardware and
      decoded values agree with trusted references within documented tolerances.
 
-6. **P1 — Make live polling capability-aware, paced, and auditable.**
+5. **P1 — Make live polling capability-aware, paced, and auditable.**
 
    - Replace the single all-sensors cadence with a serialized poll plan: RPM,
      TPS, and MAP at the fastest sustainable tier; oxygen/fuel-trim data at a
@@ -147,7 +121,7 @@ capability, **P2** user-facing diagnostics.
      every displayed value is traceable to raw bytes, and absence/failure states
      are explicit.
 
-7. **P1 — Improve serial discovery and ISO session recovery.**
+6. **P1 — Improve serial discovery and ISO session recovery.**
 
    - Deduplicate macOS device aliases that share the same VID, PID, FTDI serial
      number, USB location, and interface, while preserving genuinely separate
@@ -166,7 +140,7 @@ capability, **P2** user-facing diagnostics.
      failures recover, and a lost session cannot be mistaken for an unsupported
      sensor.
 
-8. **P2 — Add live-data selection and verifiable recording.**
+7. **P2 — Add live-data selection and verifiable recording.**
 
    - Add a sensor picker driven by the session's advertised PID set, showing
      which PIDs TrECU can decode and which are available as raw data only.
@@ -184,14 +158,14 @@ capability, **P2** user-facing diagnostics.
      decoded values remain auditable from raw frames, and recover a valid file
      after routine disconnects.
 
-9. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
+8. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
 
    - Preserve Mode `01` PID `01` as the authority for MIL state and stored-DTC
      count, with Mode `03` retries reconciled against it and Mode `07` pending
      codes best-effort. Add replay coverage for inconsistent counts, silence,
      duplicate codes, and recovery after a transient timeout.
    - Validate Mode `09` identification only after the bounded multi-frame parser
-     from step 3 works against captured responses; otherwise label it
+     from step 2 works against captured responses; otherwise label it
      unsupported rather than returning plausible partial ASCII.
    - Validate ISO Mode `04` clear-DTC separately on a controlled bike or bench
      target with a known recoverable fault. Preserve the confirmation guard and

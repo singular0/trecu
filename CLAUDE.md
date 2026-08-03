@@ -5,16 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `trecu` is a cross-platform TUI (Textual) that reads and decodes ECU fault codes (DTCs)
-from Triumph motorcycles over a cheap KKL / FT232RL K-line cable. It speaks the
-two protocols Triumphs use, decodes DTCs per SAE J2012, and can clear them.
+from Triumph motorcycles over a cheap KKL / FT232RL K-line cable. It speaks
+**ISO 9141-2 / OBD-II** — the one endpoint confirmed on a real bike — decodes
+DTCs per SAE J2012, and can clear them. Engine-ECU diagnostics only: no CAN
+modules, ABS, manufacturer service functions, tuning, or programming.
 `README.md` is the user-facing guide; the byte-level K-line handshake lives in
 the **K-line protocol reference** section below — read it before touching the
 protocol layer.
 
-The KWP2000 framing, fast-init, DTC services, and SAE J2012 decoding are all
+The 5-baud init, OBD framing, DTC services, and SAE J2012 decoding are all
 hand-rolled here on purpose: a KKL cable is a *dumb* FTDI serial adapter, **not**
 an ELM327, so `python-OBD` does not apply, and there is no maintained general
-Python KWP2000 client for a raw K-line. Dependencies are kept small and to
+Python OBD client for a raw K-line. Dependencies are kept small and to
 well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 (formatting, via textual), and `pyserial` (FT232RL VCP access).
 
@@ -23,7 +25,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (187 tests, ~56s, no hardware)
+./.venv/bin/python -m pytest              # full suite (135 tests, ~53s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
@@ -39,19 +41,20 @@ defaulting to `tui`. `--port`, `--baud`, and `--mock` are
 `argparse.SUPPRESS`-hidden development hooks — the public surface auto-detects
 the cable.
 
-Tests run **entirely against the in-memory mock ECUs** — never require hardware,
+Tests run **entirely against the in-memory mock ECU** — never require hardware,
 and any new test must follow suit. Use `--debug` on the CLI to dump raw byte
 traffic when debugging a protocol (it also auto-opens the TUI's Log tab).
 
 Shared test scaffolding lives in two files, so a new test doesn't rebuild it:
 `tests/conftest.py` has the fixtures — `mock_app` (a `TrecuApp` on a fixed mock
-ECU: simulated port, `iso9141`, no keepalive ticker), `picker_app` (no port yet,
-so it opens the picker; protocol deliberately *not* defaulted), and `wait_for`
+ECU: simulated port, no keepalive ticker), `picker_app` (no port yet, so it
+opens the picker), and `wait_for`
 (`await wait_for(cond, pilot.pause)` — reads/clears/live polls run off the event
 loop in `asyncio.to_thread`, so poll for the result, never `sleep` a guess).
 `tests/mock_ecus.py` has the ECU doubles more than one file needs — counting /
-gated (5-baud init blocks on an `Event`, for mid-connect assertions) / failing —
-plus `FAIL_FAST` (one init attempt, no settle wait) and `TWO_PORTS`.
+gated (5-baud init blocks on an `Event`, for mid-connect assertions) / failing /
+`BytePipeOnly` (a bare transport that cannot slow-init) — plus `FAIL_FAST` (one
+init attempt, no settle wait) and `TWO_PORTS`.
 
 ## Releasing
 
@@ -86,77 +89,55 @@ one of these seams, not rewiring the app:
 CLI (cli.py) / TUI (tui/app.py)
         │                        ← the TUI's session/connect state machine
         │                          lives in tui/session.py (no Textual import)
-DiagnosticService (service.py)   ← owns lifecycle; picks the protocol
+DiagnosticService (service.py)   ← owns lifecycle; builds the client
         │
-Iso9141Client | Kwp2000Client    ← protocol/*.py; duck-typed, interchangeable
+Iso9141Client (protocol/iso9141.py)  ← the one protocol client
         │
 Transport (transport/base.py)    ← half-duplex byte pipe: serial or mock
 ```
 
-**The two protocol clients are duck-typed peers, not a class hierarchy** — but
-that surface is *named*: `EcuClient`, a runtime-checkable `typing.Protocol` in
-`kwp2000.py` (the home of the shared vocabulary). Nothing inherits from it;
-conformance stays structural, so a third client is checkable
-(`isinstance(client, EcuClient)`, see `tests/test_client_contract.py`) instead of
-prose-only, and the service calls every member **directly** — no `getattr`
-probes, so a missing method fails loudly rather than being swallowed. It covers
-`connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo, status)]`,
-`read_identification() -> EcuInfo`, `read_live(pids) -> dict[pid, data_bytes]`,
-`clear_dtcs()`, `keepalive()`, `stop_communication()`, plus the two
-decode-steering attributes below. `stop_diagnostic_session()` is deliberately
-outside it — a KWP-only service that `DiagnosticService.close()` still probes
-for. `read_live()` polls
-live sensors (Phase 3): iso9141 sends one OBD **Mode 01** request per PID; KWP
-uses **ReadDataByLocalIdentifier** (0x21). Both return *raw* data bytes per
-requested id (an id the ECU doesn't answer is simply omitted) — decoding to
-physical values is the service's job via the sensor-decode layer, not the
-client's. Each client also carries two decode-steering attributes the service
-reads: `live_source` (`"obd_mode01"` vs `"kwp_local"`) names which decode table
-(`obd_sensors.json` vs `keihin_sensors.json`) decodes its live data — on the KWP
-path the service requests the **one packed `21 80` frame** (the Keihin
-MODE_READ_SENSORS RLI) and splits it per the `kwp_local` channel table — and
-`dtc_family` (`None` vs a
-letter like `"K"`) selects the DTC labelling scheme, because Keihin `0x18`
-responses carry **raw fault numbers that are not SAE-J2012 bit-encoded**.
-`keepalive()` holds a persistent session open (F1):
-KWP sends `TesterPresent` (0x3E, response suppressed), iso9141 has no such
-service so it pokes the link with a cheap read-only Mode 01 PID 00.
-`read_identification()` is best-effort (OBD Mode 09 / KWP ReadEcuIdentification
-0x1A) — a missing reply yields empty fields, not an error. `iso9141.py` imports
-the *shared* types (`ConnectionInfo`, `EcuInfo`, `Logger`, `ProtocolError`,
-`decode_identification_ascii`) **and shared service logic** — the whole 5-baud
-slow init (`slow_init_handshake`, the validated one-shot handshake; the
-`slow_init_with_retries` loop **both clients' `connect()` calls**, which owns
-the retry/settle policy and the transport-capability refusal; and
-`SlowInitConfig`, the timing + retry section `Iso9141Config` and
-`Kwp2000Config` each *compose* rather than duplicate) plus `parse_obd_dtc_pairs`
-+ `STATUS_CONFIRMED`/`STATUS_PENDING` for OBD Mode
-03/07 responses — *from* `kwp2000.py`, so kwp2000 is effectively the home of
-the common protocol vocabulary even though the two speak entirely different
-wire protocols. Keep any new shared type or shared helper there. Only the init
-*address* stays per-protocol (`init_address` 0x33 vs `ecu_address` 0xD5): it is
-a protocol fact, not handshake timing.
+**There is one protocol client, and no client abstraction over it.** TrECU used
+to carry two duck-typed peers (`Iso9141Client` / `Kwp2000Client`) behind an
+`EcuClient` `typing.Protocol`; the KWP path was community speculation that never
+touched a bike, so it is gone, and with it the `EcuClient` seam, `live_source`,
+`dtc_family`, and the per-attempt protocol sweep. `DiagnosticService` types
+directly against `Iso9141Client` and calls its members **directly** — no
+`getattr` probes, so a missing method fails loudly rather than being swallowed.
+The surface is `connect() -> ConnectionInfo`, `read_dtcs() -> list[(hi, lo,
+status)]`, `read_identification() -> EcuInfo`, `read_live(pids) -> dict[pid,
+data_bytes]`, `clear_dtcs()`, `keepalive()`, `stop_communication()`.
+`read_live()` polls live sensors (Phase 3) with one OBD **Mode 01** request per
+PID, returning *raw* data bytes per requested PID (a PID the ECU doesn't answer
+is simply omitted) — decoding to physical values is the service's job via the
+sensor-decode layer, not the client's. `keepalive()` holds a persistent session
+open (F1): OBD-II has no TesterPresent service, so it pokes the link with a
+cheap read-only Mode 01 PID 00. `read_identification()` is best-effort (OBD
+Mode 09) — a missing reply yields empty fields, not an error.
 
-**`DiagnosticService` is the only place that knows about protocol selection.**
-`protocol="auto"` (the default) tries `iso9141` → `kwp-slow` → `kwp-fast` in
-order (the same sweep other K-line Triumph tools walk), building a fresh
-client per attempt and keeping the first that `connect()`s. `iso9141` is first
-because it's the confirmed real-Triumph path (5-baud slow init + OBD-II);
-`kwp-slow` is `Kwp2000Client` with `init_mode="slow"` (5-baud init at the ECU
-address `0xD5`, the Keihin K-line fallback — the service pins `init_mode`
-per attempt via `dataclasses.replace`). Each candidate reads its **own section**
-of the service's `EcuConfig` (see "Protocol values vary by model"), so a
-per-bike override survives the sweep instead of applying only when a protocol is
-named. A caller can also inject a pre-built
-`client=` to bypass selection entirely (used by tests). An optional `progress`
-callback fires with each candidate label *before* it's probed, so a UI can show
-which protocol the sweep is currently trying (the TUI's connecting modal does).
+**`protocol/common.py` is the home of the shared vocabulary** — everything that
+sits *below* the OBD service layer: `ProtocolError`, `ConnectionInfo`, `EcuInfo`,
+`decode_identification_ascii`, `parse_obd_dtc_pairs` +
+`STATUS_CONFIRMED`/`STATUS_PENDING` for Mode 03/07 responses, and the whole
+5-baud slow init (`slow_init_handshake`, the validated one-shot handshake;
+`slow_init_with_retries`, the loop `connect()` calls, which owns the
+retry/settle policy and the transport-capability refusal; and `SlowInitConfig`,
+the timing + retry section `Iso9141Config` *composes* rather than inlines).
+`iso9141.py` imports all of it and stays about OBD requests and responses. Keep
+any new shared type or shared helper in `common.py`.
+
+**`DiagnosticService` builds exactly one client.** `_build_client()` returns an
+`Iso9141Client` over this session's device and config; `_connect()` calls it
+once and raises `ProtocolError("could not connect: …")` if the init fails —
+there is no candidate list and no sweep to walk. A caller can inject a pre-built
+`client=` to bypass construction entirely (used by tests). `active_protocol` /
+`ReadResult.protocol` still report the label `"iso9141"` (the `PROTOCOL_ISO9141`
+constant) because the TUI shows it on the Dashboard.
 
 **The service holds its device as a factory, not an instance.** One transport is
 built per session (lazily, on first use) and released by `close()`, so `close()`
 → `open()`/`start_session()` reconnects over a **fresh** device — reconnect is a
 service operation rather than something the caller rebuilds the service for.
-`as_transport_factory` normalizes either shape (mirroring `as_ecu_config`):
+`as_transport_factory` normalizes either shape:
 handing over a **`Transport` instance** instead pins that one device for every
 session, which is exactly what `trecu tui --mock` wants — one simulated ECU, so
 codes the user clears stay cleared across connects. `service.transport` is the
@@ -176,66 +157,47 @@ ticker (`_Keepalive`, a daemon thread) sending `client.keepalive()` every
 idle — pass `keepalive_interval=0` to disable it. Because the K-line is
 half-duplex, every operation *and* every keepalive beat runs under one
 `_io_lock`, so a beat can never interleave with a read/clear. This is the seam
-that Phase 3 live-polling / Phase 5 actuator tests build on.
+Phase 3 live-polling builds on.
 
 **Transports advertise capabilities via class flags**, and the protocol layer
 branches on them rather than on concrete types:
 - `echoes` — single-wire K-line reflects every TX byte into RX; the client
   discards that echo before parsing. Real serial echoes; mocks don't.
-- `supports_fast_init` / `supports_slow_init` — a client refuses to `connect()`
-  over a transport that can't do its init. `MockObdTransport` is slow-init only;
-  `MockKLineTransport` is fast-init only *by default* (pass
-  `supports_slow_init=True` to emulate the Keihin 5-baud init for `kwp-slow`);
-  `KLineSerialTransport` does both. **Neither `fast_init` nor `five_baud_init`
-  is abstract**: a transport implements whichever waveform its device can drive
-  and the flag is what declares that, so a mock doing one init doesn't
-  implement-and-raise the other — `Transport`'s own raise is only the backstop
-  for a caller that ignored the flag.
+- `supports_slow_init` — the client refuses to `connect()` over a transport that
+  can't drive the 5-baud init. `MockObdTransport` and `KLineSerialTransport`
+  both can; `tests/mock_ecus.py`'s `BytePipeOnly` deliberately can't.
+  **`five_baud_init` is not abstract**: a transport implements the waveform only
+  if its device can drive it and the flag is what declares that, so a plain byte
+  pipe doesn't implement-and-raise it — `Transport`'s own raise is only the
+  backstop for a caller that ignored the flag.
 
-**Two mock ECUs, one per protocol path** (`transport/mock_obd.py`,
-`transport/mock_kline.py`). `MockObdTransport` is the default `--mock` and emulates the
-real bike observed over the cable: 5-baud init, key bytes `08 08`, and — with no
-`dtcs=` — one stored `P1108` with MIL on. That single-fault default is the
-deterministic ground truth for the iso9141 path (tests assert it; if you change
-that client, update this mock to match and vice versa), but the **`--mock` CLI
-seeds each mock with a random, type-varied fault set** from
+**One mock ECU** (`transport/mock_obd.py`). `MockObdTransport` is what `--mock`
+builds, and it emulates the real bike observed over the cable: 5-baud init, key
+bytes `08 08`, and — with no `dtcs=` — one stored `P1108` with MIL on. That
+single-fault default is the deterministic ground truth the tests assert against;
+if you change the client, update this mock to match and vice versa. The
+**`--mock` CLI seeds it with a random, type-varied fault set** from
 `DtcDatabase.random_dtcs` (see the DTC-decoding section) so a demo run shows a
-plausible spread rather than one canned code — hence the OBD mock's Mode 03
-serves *every* stored DTC (padded to a 3-pair frame when fewer), never capping
-at three, so a >3-fault read still reconciles against the Mode 01 PID 01 count.
-`MockKLineTransport`
-mirrors the community-documented Keihin K-line ECU (address `D5`/`F5`, DTCs via
-OBD Mode 03 over KWP framing *and* legacy `0x18`, AccessTimingParameter
-recorded in `timing_params`, ident on the Keihin RLIs) — same sync rule vs.
-`Kwp2000Client`/`Kwp2000Config`. Both mocks also serve
-**placeholder** ECU identity (Mode 09 / RLI records) so identification is
-testable — those VIN/calibration strings are invented, not real-bike facts.
-Both also answer **live-data** requests (Phase 3) with plausible, *moving*
-values from `transport/_mock_live.py`, whose encoders are the inverse of the
-`obd_sensors.json` / `keihin_sensors.json` formulas — keep them in sync. The OBD mock answers per-PID
-(an unmodelled PID gets no reply, so `read_live` omits it); the K-line mock
-serves only LID `0x80` — one packed frame in the draft `kwp_local` layout
-(`kwp_live_frame`), a handful of channels moving and the rest zero — and
-rejects any other record. Its default DTC triples are J2012-encoded for the
-Mode 03 path; tests for the `0x18` path pass Keihin-style raw fault numbers
-via `dtcs=` instead.
+plausible spread rather than one canned code — hence its Mode 03 serves *every*
+stored DTC (padded to a 3-pair frame when fewer), never capping at three, so a
+>3-fault read still reconciles against the Mode 01 PID 01 count. It also serves
+**placeholder** ECU identity (Mode 09) so identification is testable — those
+VIN/calibration strings are invented, not real-bike facts — and answers
+**live-data** requests (Phase 3) with plausible, *moving* values from
+`transport/_mock_live.py`, whose encoders are the inverse of the
+`obd_sensors.json` formulas; keep the two in sync. An unmodelled PID gets no
+reply, so `read_live` omits it.
 
-**KWP2000 framing (`protocol/framing.py`) is pure and transport-independent** —
-build/parse ISO 14230 frames, checksum, incremental length hints. Test it in
-isolation; it has no I/O.
-
-**DTC decoding (`protocol/dtc.py`) is source-aware.** `decode_dtc_bytes(hi, lo,
-family=None)` has two labelling schemes: `family=None` is the structural SAE
-J2012 decode (`P/C/B/U` from the top two bits — correct for OBD Mode 03/07,
-including Mode 03 over KWP framing), while a family letter (`"K"`) prepends it
-to the four *raw* hex digits — the community labelling convention for Keihin `0x18`
-ReadDTCByStatus responses, whose fault numbers are **not** J2012 bit-encoded
-(bytes `15 35` are `K1535`, not `P1535`). The service passes each client's
-`dtc_family` into `DtcDatabase.decode_all`; `Kwp2000Config.dtc_family`
-(default `"K"`) applies only on the `0x18` path. Descriptions come from
+**DTC decoding (`protocol/dtc.py`) has one labelling scheme.**
+`decode_dtc_bytes(hi, lo)` is the structural SAE J2012 decode: `P/C/B/U` from
+the top two bits of the high byte, then four hex digits — how OBD Mode 03/07
+responses encode a code, and the only scheme TrECU reads. (A `family=` parameter
+used to select a raw non-J2012 labelling for Keihin `0x18` responses; it went
+with the KWP path, along with the 134 `K` and 8 `L` codes in the database that
+no structural decode could ever produce.) Descriptions come from
 `data/triumph_dtc.json` — a flat `{code: description}` map imported wholesale
-from the official-service-manual wording in a community-sourced extract (557 codes:
-360 `P`, 134 `K`, 30 `C`, 25 `U`, 8 `L`). Codes vary by model/year — extend
+from the official-service-manual wording in a community-sourced extract (415 codes:
+360 `P`, 30 `C`, 25 `U`). Codes vary by model/year — extend
 the JSON, don't hardcode; an unknown code still decodes and shows a generic
 message. `encode_dtc_code` is the inverse of the *structural* decode (`"P1108"`
 → `(0x11, 0x08)`; only `P/C/B/U` with a first digit `0-3` round-trip, else
@@ -245,30 +207,20 @@ family-varied set of real DB codes as byte pairs — the seed for the random
 
 **Sensor decoding (`protocol/pids.py`)** is the Phase 3 parallel to `dtc.py`: it
 turns a PID's raw data bytes into a named, unit-bearing `SensorReading` using
-two model-value tables under `data/`, one per live path (F2). Each PID carries a **formula**
+the model-value table `data/obd_sensors.json`. Each PID carries a **formula**
 — an expression over the data bytes `A, B, C, D` (A = first byte, big-endian) as
 SAE J1979 writes it — evaluated by a tiny arithmetic interpreter (`compile_formula`)
 restricted to `+ - * /`, unary sign, parens, and those four names; **never Python
 `eval`**. A bad formula raises `FormulaError` at *load*, not mid-poll.
-`obd_sensors.json` holds the standardized OBD PIDs (the confirmed path), a flat
-`{hex-pid: entry}` map loaded as `PidDatabase`; `keihin_sensors.json` is a
-community-reverse-engineered 53-channel Keihin table loaded as a **separate**
-`KwpLocalTable` (the service holds it as `self.kwp_local`, alongside `self.pids`):
-channel keys are *decimal* indices from that table, each entry carries
-`frame_offset`/`bytes` locating it inside the one packed `21 80` frame, and
-`decode_frame` splits such a frame into readings. The two tables decode
-*entirely* differently but load identically, so the `{int id -> PidDef}`
-load/lookup half is a shared `_SensorTable` base — a subclass names its
-`data_file`, owns `from_dict` (the two files have different shapes), and keeps
-its own id vocabulary (`pids()` vs `channels()`) and decode surface.
-**The kwp_local layout and divisors are a DRAFT**:
-names/kind/decimals/offset/fullscale come from that community-sourced data, but the real
-per-channel divisors and frame byte offsets need an F4 hardware capture —
-fixing them is a data-only JSON edit. `DiagnosticService.read_live(pids=None)`
-runs a client's `read_live` under `_io_lock`, then decodes outside the lock
-into ordered `SensorReading`s (dropping any id the ECU didn't answer or the
-table can't decode); on the OBD path `None` means `DEFAULT_LIVE_PIDS`, on the
-KWP path `pids` are channel indices and `None` means every channel.
+`obd_sensors.json` is a flat `{hex-pid: entry}` map of the standardized OBD PIDs,
+loaded into `PidDatabase` as `{int pid -> PidDef}`. (There used to be a second,
+community-reverse-engineered Keihin channel table decoded from one packed frame,
+with a `_SensorTable` base and a `frame_offset` field to share the load/lookup
+half between them — all removed with the KWP path.)
+`DiagnosticService.read_live(pids=None)` runs the client's `read_live` under
+`_io_lock`, then decodes outside the lock into ordered `SensorReading`s
+(dropping any PID the ECU didn't answer or the table can't decode); `None`
+means `DEFAULT_LIVE_PIDS`.
 
 **TUI layout (`tui/app.py`) uses Textual's one-row `Header` title bar over a
 `TabbedContent` body.** The title bar shows the app name and version together
@@ -337,18 +289,18 @@ callers share one attempt rather than opening the port twice.
 A **fresh** connect (`_ecu.connected` false) runs behind a `ConnectingScreen`
 modal — a standard `LoadingIndicator` spinner + Cancel button, raised by the
 controller's one-shot `on_start` hook; re-reads over the held session skip it.
-The modal names the **target port** and the **protocol currently being probed**:
-the service takes a `progress` callback
-that fires with each candidate label *before* it's tried, and the app marshals
-it onto the UI thread (`_on_connect_probe` → `set_probing`) so the auto-sweep's
-`iso9141 → kwp-slow → kwp-fast` progression is visible live. Because the blocking
+The modal names the **target port** and, on a fixed line, what it is doing on it
+(`_CONNECT_DETAIL`, "ISO 9141-2 · 5-baud init..."). That line used to be live —
+the service took a `progress` callback that fired per candidate so the
+auto-sweep's progression showed — but with one protocol there is nothing to
+report, and the init's retries all happen behind it. Because the blocking
 connect runs off the event loop in `asyncio.to_thread`, it **can't be interrupted
 cleanly**, but it *is* blocked in serial I/O — so Cancel (`_request_cancel_connect`
 → `SessionController.cancel`) **force-closes the in-flight service** to unblock
 that read and release the port, drops the modal, and **hands straight back to the
 port picker** (when a port lister is configured; the ready state otherwise)
-*without* waiting for the thread — which on a slow `auto` init sweep can be many
-seconds, so waiting would make Cancel feel dead. Cancel also **detaches** the
+*without* waiting for the thread — a 5-baud init working through its retry
+budget can take many seconds, so waiting would make Cancel feel dead. Cancel also **detaches** the
 attempt immediately, so a connect requested *after* it starts fresh instead of
 inheriting the doomed outcome; each attempt therefore carries its **own** cancel
 flag (`_Attempt`), since the abandoned one keeps running and must discard itself
@@ -382,34 +334,30 @@ re-syncs). It replaces nothing — the one-shot Read worker
 
 ## Protocol values vary by model — this is a real constraint
 
-Triumph diagnostics were community-reverse-engineered; addresses,
-session sub-functions, and DTC services differ across Keihin vs Sagem ECUs and
-model years. Every such value lives in a `@dataclass` config (`Iso9141Config`,
-`Kwp2000Config`) with documented defaults, overridable via CLI flags
-(`--init-address`, `--ecu-address`, …). When a value might differ per bike, add
-it to the config rather than inlining a constant.
+Triumph diagnostics were community-reverse-engineered; addresses and timings
+differ across Keihin vs Sagem ECUs and model years — some Sagem models are
+reported to use the 5-baud init address `0x43` rather than the OBD-standard
+`0x33`. Every such value lives in the one `@dataclass` config, `Iso9141Config`,
+with documented defaults, overridable via CLI flags (`--init-address`,
+`--timeout`). When a value might differ per bike, add it to that config rather
+than inlining a constant.
 
-**Both configs travel together in one `EcuConfig`** (`service.py`: an `iso9141`
-and a `kwp2000` section). Protocol selection happens *per attempt*, so a single
-config whose **type** implied the protocol could not express both at once —
-which is why `auto`, the default mode, used to drop every connection flag on the
-floor. `DiagnosticService` normalizes whatever it's handed through
-`as_ecu_config()`: `None` → all defaults, a bare `Iso9141Config`/`Kwp2000Config`
-→ that section (the other stays at its documented defaults), so callers and
-tests can still pass one config. In the CLI those four flags parse as `None`
-when unset — meaning "leave that protocol's own default alone", since e.g. the
-two `p2_timeout` defaults genuinely differ (0.8 vs 1.0) and a CLI default would
-flatten them — and `_make_transport` builds the **mock ECU from the same
-config**, so an override moves the simulated ECU and the tester together.
+**One config, one section.** `DiagnosticService(config=...)` takes an
+`Iso9141Config` or `None` (all defaults) — there is no `EcuConfig` wrapper or
+`as_ecu_config()` normalizer any more; both existed only to carry an iso9141
+*and* a kwp2000 section through a per-attempt protocol sweep. In the CLI the two
+flags parse as `None` when unset, meaning "leave the config's documented default
+alone", and `_make_transport` builds the **mock ECU from the same config**, so
+an override moves the simulated ECU and the tester together.
 
 ## Known real-hardware facts (from a live bike, not derivable from code)
 
 - The tester's bike — a **Triumph Bonneville 865 EFI (2009)**, the *only* bike
   trecu has been tested against — is on `/dev/cu.usbserial-3` and is a
-  **Sagem-style ECU requiring 5-baud SLOW init** (fast-init gets no data). After
-  the handshake it speaks **standard OBD-II over ISO 9141-2** (header `68 6A F1`
-  out / `48 6B D1` in), not proprietary KWP — hence `iso9141` is the default
-  `auto` first choice.
+  **Sagem-style ECU requiring 5-baud SLOW init** (ISO 14230 fast-init got no
+  data when it was still implemented). After the handshake it speaks **standard
+  OBD-II over ISO 9141-2** (header `68 6A F1` out / `48 6B D1` in), not a
+  proprietary protocol — which is why ISO 9141-2 is the *only* path TrECU ships.
 - Live-confirmed read: one stored `P1108` (ambient-pressure sensor) with MIL on.
 - The ECU needs a few seconds to settle between back-to-back 5-baud init
   attempts; `Iso9141Client` retries (`init_retries`, `retry_wait`) cover this.
@@ -438,10 +386,8 @@ config**, so an override moves the simulated ECU and the tester together.
 
 The single-wire K-line **echoes** everything the tester transmits; the client
 discards that echo before parsing (see the `echoes` transport flag). Each DTC is
-decoded per **SAE J2012** (`P/C/B/U` + 4 hex) — except Keihin `0x18` responses,
-labelled `K` + raw hex (see the DTC-decoding section) — and looked up in
-`data/triumph_dtc.json`. Three paths, auto-tried `iso9141` → `kwp-slow` →
-`kwp-fast` (the standard Triumph K-line sweep):
+decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
+`data/triumph_dtc.json`. One path:
 
 **ISO 9141-2 + OBD (`iso9141`, the confirmed Triumph case):**
 
@@ -454,27 +400,3 @@ labelled `K` + raw hex (see the DTC-decoding section) — and looked up in
    *first*; then **Mode 03** (`68 6A F1 03`) → stored DTCs (retried and
    reconciled against the count); **Mode 07** → pending (best-effort).
 4. **Mode 01** per PID → live sensor data (Phase 3); **Mode 04** → clear codes.
-
-**KWP2000 paths (`kwp-slow`, `kwp-fast`) — Triumph Keihin, community-derived
-(addressing `D5`/`F5`, request headers `81/82 D5 F5`):**
-
-1. **Init.** `kwp-slow`: 5-baud init at the **ECU address `0xD5`** (same
-   waveform, inverted-address validation, *and* retry policy as iso9141's, via
-   the shared `slow_init_with_retries` /
-   `slow_init_handshake` / `SlowInitConfig`); the handshake's key bytes *are* the session's — no
-   StartCommunication follows. `kwp-fast`: K-line low 25 ms / high 25 ms via
-   the UART break → **StartCommunication** (`0x81`) → key bytes.
-2. **StartDiagnosticSession** `10 02`, then **AccessTimingParameter**
-   `83 03 1E 02 0A 14 00` (P-timing 30/2/10/20/0) — both best-effort; a
-   refusal is logged, not fatal.
-3. **ReadEcuIdentification** (`0x1A`) on the community-documented Triumph RLIs
-   `0xA0`/`0xAE`/`0x8C` (which record carries which field is unconfirmed on
-   hardware — F4; standard `0x90/0x91/0x94` remain config overrides).
-4. **DTCs:** OBD **Mode 03 over KWP framing** (`read_dtc_service=0x03`, the
-   standard K-line default; response `43 <hi lo>…`, synthetic confirmed status,
-   J2012-decoded) or legacy **ReadDTCByStatus** (`0x18`, real status bytes —
-   and **raw Keihin fault numbers**, labelled with the `dtc_family` letter
-   `K` instead of the J2012 bit-decode). **ReadDataByLocalIdentifier**
-   (`21 80`, the Keihin MODE_READ_SENSORS RLI) → one packed frame carrying all
-   live channels, split per the `kwp_local` table;
-   **ClearDiagnosticInformation** (`0x14`, group `FF 00`) to clear.

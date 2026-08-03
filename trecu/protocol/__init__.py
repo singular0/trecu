@@ -1,43 +1,15 @@
-"""KWP2000 protocol and DTC decoding."""
+"""ISO 9141-2 / OBD-II protocol, sensor decoding, and DTC decoding."""
 
-from .framing import (
-    ADDR_FUNCTIONAL,
-    ADDR_NONE,
-    ADDR_PHYSICAL,
-    ChecksumError,
-    IncompleteFrame,
-    ParsedFrame,
-    build_frame,
-    checksum,
-    parse_frame,
-)
-from .kwp2000 import (
-    EcuClient,
-    Kwp2000Client,
-    Kwp2000Config,
-    NegativeResponse,
-    ProtocolError,
-)
+from .common import ConnectionInfo, EcuInfo, ProtocolError
 from .iso9141 import Iso9141Client, Iso9141Config
 from .dtc import Dtc, DtcDatabase, decode_dtc_bytes
 
 __all__ = [
-    "ADDR_FUNCTIONAL",
-    "ADDR_NONE",
-    "ADDR_PHYSICAL",
-    "ChecksumError",
-    "IncompleteFrame",
-    "ParsedFrame",
-    "build_frame",
-    "checksum",
-    "parse_frame",
-    "EcuClient",
-    "Kwp2000Client",
-    "Kwp2000Config",
+    "ConnectionInfo",
+    "EcuInfo",
+    "ProtocolError",
     "Iso9141Client",
     "Iso9141Config",
-    "NegativeResponse",
-    "ProtocolError",
     "Dtc",
     "DtcDatabase",
     "decode_dtc_bytes",

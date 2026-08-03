@@ -1,7 +1,7 @@
 import pytest
 
 from trecu.protocol.iso9141 import Iso9141Client, Iso9141Config
-from trecu.protocol.kwp2000 import ProtocolError, SlowInitConfig
+from trecu.protocol.common import ProtocolError, SlowInitConfig, parse_obd_dtc_pairs
 from trecu.service import DiagnosticService
 from trecu.transport.mock_obd import MockObdTransport
 
@@ -46,7 +46,7 @@ class NoInvAddr(MockObdTransport):
 
 
 def test_obd_read_decode_clear_cycle():
-    with DiagnosticService(MockObdTransport(), protocol="iso9141") as svc:
+    with DiagnosticService(MockObdTransport()) as svc:
         result = svc.read_faults()
         assert result.protocol == "iso9141"
         assert result.key_bytes == b"\x08\x08"
@@ -59,11 +59,18 @@ def test_obd_read_decode_clear_cycle():
         assert after.count == 0
 
 
-def test_auto_selects_iso9141_for_obd_ecu():
-    with DiagnosticService(MockObdTransport(), protocol="auto") as svc:
+def test_service_reports_the_iso9141_protocol_label():
+    with DiagnosticService(MockObdTransport()) as svc:
         result = svc.read_faults()
         assert result.protocol == "iso9141"
+        assert svc.active_protocol == "iso9141"
         assert [d.code for d in result.dtcs] == ["P1108"]
+
+
+def test_parse_obd_dtc_pairs_skips_padding_and_odd_tail():
+    body = bytes((0x11, 0x08, 0x00, 0x00, 0x01, 0x07, 0x99))  # pad pair + odd byte
+    assert parse_obd_dtc_pairs(body, 0x08) == [(0x11, 0x08, 0x08), (0x01, 0x07, 0x08)]
+    assert parse_obd_dtc_pairs(b"", 0x08) == []
 
 
 def test_client_connect_and_status():
@@ -80,7 +87,7 @@ def test_client_connect_and_status():
 
 def test_custom_dtcs_and_mil_off():
     t = MockObdTransport(dtcs=[(0x01, 0x07)], mil=False)  # P0107, MIL off
-    with DiagnosticService(t, protocol="iso9141") as svc:
+    with DiagnosticService(t) as svc:
         result = svc.read_faults()
         assert [d.code for d in result.dtcs] == ["P0107"]
 
@@ -119,7 +126,7 @@ def test_no_faults_still_reads_clean_when_status_says_zero():
 def test_service_surfaces_read_failure_end_to_end():
     t = SilentMode03()
     cfg = Iso9141Config(dtc_retries=2, **_FAST)
-    with DiagnosticService(t, config=cfg, protocol="iso9141") as svc:
+    with DiagnosticService(t, config=cfg) as svc:
         with pytest.raises(ProtocolError):
             svc.read_faults()
 

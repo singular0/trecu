@@ -4,17 +4,17 @@ is what the session then connects over."""
 import asyncio
 
 from trecu.tui.port_select import PortSelectScreen
-from trecu.transport.mock_kline import MockKLineTransport
+from trecu.transport.mock_obd import MockObdTransport
 
 from mock_ecus import TWO_PORTS
 
 
-def test_picker_shown_when_multiple_ports_and_selection_reads(picker_app):
+def test_picker_shown_when_multiple_ports_and_selection_reads(picker_app, wait_for):
     picked = {}
 
     def transport_for_port(device):
         picked["device"] = device
-        return MockKLineTransport()
+        return MockObdTransport()
 
     app = picker_app(transport_for_port)
 
@@ -23,20 +23,21 @@ def test_picker_shown_when_multiple_ports_and_selection_reads(picker_app):
             await pilot.pause(0.2)
             assert isinstance(app.screen, PortSelectScreen)
             await pilot.press("enter")          # select the highlighted (first) port
-            await pilot.pause(0.4)
-            table = app.query_one("#dtcs")
-            assert table.row_count == 3
+            # The read runs off the event loop; poll rather than guess a sleep.
+            await wait_for(
+                lambda: app.query_one("#dtcs").row_count == 1, pilot.pause
+            )
             assert picked["device"] == "/dev/cu.usbserial-A"
 
     asyncio.run(scenario())
 
 
-def test_connect_button_reads_highlighted_port(picker_app):
+def test_connect_button_reads_highlighted_port(picker_app, wait_for):
     picked = {}
 
     def transport_for_port(device):
         picked["device"] = device
-        return MockKLineTransport()
+        return MockObdTransport()
 
     app = picker_app(transport_for_port)
 
@@ -46,8 +47,9 @@ def test_connect_button_reads_highlighted_port(picker_app):
             assert isinstance(app.screen, PortSelectScreen)
             await pilot.press("down")            # move to the second port
             await pilot.click("#connect")        # Connect button, not Enter
-            await pilot.pause(0.4)
-            assert picked["device"] == "/dev/cu.usbserial-B"
+            await wait_for(
+                lambda: picked.get("device") == "/dev/cu.usbserial-B", pilot.pause
+            )
 
     asyncio.run(scenario())
 
@@ -59,7 +61,7 @@ def test_rescan_repopulates_after_ports_appear(picker_app):
         calls["n"] += 1
         return [] if calls["n"] == 1 else list(TWO_PORTS)
 
-    app = picker_app(lambda d: MockKLineTransport(), list_ports=lister)
+    app = picker_app(lambda d: MockObdTransport(), list_ports=lister)
 
     async def scenario():
         async with app.run_test() as pilot:

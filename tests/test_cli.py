@@ -30,11 +30,13 @@ def test_help_prints_public_usage(capsys) -> None:
     assert output.startswith(
         "usage: trecu [tui|ports|faults|info|sensors|clear|version|help]"
     )
-    assert "--protocol {auto,iso9141,kwp-slow,kwp-fast}" in output
     assert "--init-address INIT_ADDRESS" in output
-    assert "--ecu-address ECU_ADDRESS" in output
-    assert "--tester-address TESTER_ADDRESS" in output
     assert "--timeout TIMEOUT" in output
+    # Removed with the KWP path: the CLI speaks one protocol, so there is
+    # nothing to select and no KWP addressing to override.
+    assert "--protocol" not in output
+    assert "--ecu-address" not in output
+    assert "--tester-address" not in output
     assert "[-y] [--debug]" in output
     assert "--mock" not in output
     assert "--port" not in output
@@ -55,7 +57,7 @@ def test_version_command(capsys) -> None:
 
 
 def test_info_command_reports_identity(capsys) -> None:
-    assert main(["info", "--mock", "--protocol", "iso9141"]) == 0
+    assert main(["info", "--mock"]) == 0
     output = capsys.readouterr().out
     assert "Connected via" not in output
     assert "Field" in output
@@ -64,7 +66,7 @@ def test_info_command_reports_identity(capsys) -> None:
 
 
 def test_faults_command_omits_identity_and_table_title(capsys) -> None:
-    assert main(["faults", "--mock", "--protocol", "iso9141"]) == 0
+    assert main(["faults", "--mock"]) == 0
     output = capsys.readouterr().out
     assert "Connected via" not in output
     assert "VIN:" not in output
@@ -77,7 +79,7 @@ def test_faults_command_omits_identity_and_table_title(capsys) -> None:
 
 
 def test_sensors_command_omits_table_title(capsys) -> None:
-    assert main(["sensors", "--mock", "--protocol", "iso9141"]) == 0
+    assert main(["sensors", "--mock"]) == 0
     output = capsys.readouterr().out
     assert "Live data snapshot" not in output
     assert "Sensor" in output
@@ -86,7 +88,7 @@ def test_sensors_command_omits_table_title(capsys) -> None:
 
 
 def test_clear_command_confirms_on_stdout(capsys) -> None:
-    assert main(["clear", "--mock", "--protocol", "iso9141", "-y"]) == 0
+    assert main(["clear", "--mock", "-y"]) == 0
     assert "Fault codes cleared." in capsys.readouterr().out
 
 
@@ -151,8 +153,8 @@ def test_tui_command_launches_ui(monkeypatch) -> None:
     launched = []
     monkeypatch.setattr(cli, "_cmd_tui", lambda args: launched.append(args) or 0)
 
-    assert main(["tui", "--protocol", "kwp-fast"]) == 0
-    assert launched[0].protocol == "kwp-fast"
+    assert main(["tui", "--init-address", "0x43"]) == 0
+    assert launched[0].init_address == 0x43
 
 
 def test_keyboard_interrupt_exits_cleanly(monkeypatch, capsys) -> None:

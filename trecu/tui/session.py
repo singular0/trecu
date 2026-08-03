@@ -16,7 +16,8 @@ caller — the app's workers already do exactly that.
 **Cancel** is the subtle part. A connect in flight is blocked in serial I/O and
 cannot be interrupted cleanly, so :meth:`cancel` force-closes the in-flight
 service to unblock that read and release the port, and returns *immediately* —
-which is what makes Cancel feel instant on a slow ``auto`` init sweep. The
+which is what makes Cancel feel instant while the 5-baud init burns through its
+retry budget. The
 doomed connect then finishes into a closed transport and is discarded: a service
 is published as :attr:`SessionController.session` **only** on full success, so a
 re-picked (even different) port always gets a clean, non-overlapping session.
@@ -31,11 +32,10 @@ from typing import Callable, Iterable, List, Optional
 
 from ..logging import LoggerLike
 from ..protocol.dtc import DtcDatabase
+from ..protocol.iso9141 import Iso9141Config
 from ..protocol.pids import PidDatabase, SensorReading
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
-    PROTOCOL_AUTO,
-    ConfigLike,
     DiagnosticService,
     ReadResult,
 )
@@ -90,14 +90,12 @@ class SessionController:
         self,
         *,
         transport_factory: Optional[TransportFactory] = None,
-        config: Optional[ConfigLike] = None,
+        config: Optional[Iso9141Config] = None,
         db: Optional[DtcDatabase] = None,
         pids: Optional[PidDatabase] = None,
         logger: Optional[LoggerLike] = None,
-        protocol: str = PROTOCOL_AUTO,
         verbose: bool = False,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
-        progress: Optional[Callable[[str], None]] = None,
     ):
         # Rebound once the user picks a port (see TrecuApp._on_port_chosen);
         # None until then, which is what `can_connect` reports on.
@@ -106,10 +104,8 @@ class SessionController:
         self._db = db
         self._pids = pids
         self._logger = logger
-        self._protocol = protocol
         self._verbose = verbose
         self._keepalive_interval = keepalive_interval
-        self._progress = progress
         # The connected service — published only once fully connected.
         self.session: Optional[DiagnosticService] = None
         # The in-flight connect: its per-attempt state (so cancel has a handle
@@ -150,9 +146,7 @@ class SessionController:
             self._config,
             self._db,
             self._logger,
-            protocol=self._protocol,
             pids=self._pids,
-            progress=self._progress,
             verbose=self._verbose,
         )
 

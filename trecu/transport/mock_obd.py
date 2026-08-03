@@ -24,7 +24,6 @@ class MockObdTransport(Transport):
     """In-memory ECU emulator for the ISO 9141-2 / OBD path."""
 
     echoes = False
-    supports_fast_init = False
     supports_slow_init = True
 
     def __init__(
@@ -64,9 +63,6 @@ class MockObdTransport(Transport):
         out = bytes(self._rx[:n])
         del self._rx[:n]
         return out
-
-    # No fast_init: ``supports_fast_init = False`` already says so, and the base
-    # class refuses the call for anything that ignores the flag.
 
     def five_baud_init(self, address: int) -> None:
         self._rx.clear()

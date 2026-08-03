@@ -60,14 +60,18 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+#: What the connecting modal says under the port name. Static, because there is
+#: one protocol to try — the 5-baud init's retries all happen behind this line.
+_CONNECT_DETAIL = "ISO 9141-2 · 5-baud init..."
+
+
 class ConnectingScreen(ModalScreen):
     """A modal shown while the K-line session is being established.
 
     Purely a status overlay: it does *not* own the connect (the app's ``ecu``
-    worker does). It shows the target port and the protocol currently being
-    probed (the auto-sweep tries several in turn — see ``set_probing``), with a
-    standard ``LoadingIndicator`` spinner. Cancel (or escape) calls back into
-    the app. The background connect can't be interrupted mid-handshake — it's
+    worker does). It names the target port and the one protocol TrECU speaks,
+    with a standard ``LoadingIndicator`` spinner. Cancel (or escape) calls back
+    into the app. The background connect can't be interrupted mid-handshake — it's
     blocked in serial I/O — so "cancel" means *stop waiting on it*: the app
     drops the modal, restores the UI, and tears the session down once the
     handshake finally returns.
@@ -100,28 +104,14 @@ class ConnectingScreen(ModalScreen):
         super().__init__()
         self._on_cancel = on_cancel
         self._port = port
-        self._protocol = ""
 
     def compose(self) -> ComposeResult:
         with Middle(id="dialog"):
             yield Label(f"Connecting to ECU via {self._port}", id="title")
-            yield Static(self._detail(), id="detail")
+            yield Static(_CONNECT_DETAIL, id="detail")
             yield LoadingIndicator(id="spinner")
             with Center(id="buttons"):
                 yield Button("Cancel", variant="primary", id="cancel")
-
-    def _detail(self) -> str:
-        if not self._protocol:
-            return "Probing protocol..."
-        return f"Probing {self._protocol} protocol..."
-
-    def set_probing(self, protocol: str) -> None:
-        """Update the 'probing' line as the auto-sweep moves between protocols."""
-        self._protocol = protocol
-        try:
-            self.query_one("#detail", Static).update(self._detail())
-        except Exception:
-            pass  # modal already dismissed
 
     def on_mount(self) -> None:
         self.query_one("#cancel", Button).focus()

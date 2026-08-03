@@ -29,11 +29,12 @@ from textual.widgets import (
 
 from .. import __version__
 from ..protocol.dtc import DtcDatabase
+from ..protocol.iso9141 import Iso9141Config
 from ..protocol.pids import PidDatabase
 from ..service import (
     DEFAULT_KEEPALIVE_INTERVAL,
     DEFAULT_POLL_INTERVAL,
-    ConfigLike,
+    PROTOCOL_ISO9141,
     ReadResult,
 )
 from ..transport.base import Transport
@@ -124,13 +125,12 @@ class TrecuApp(App):
     def __init__(
         self,
         transport_factory: Optional[TransportFactory] = None,
-        config: Optional[ConfigLike] = None,
+        config: Optional[Iso9141Config] = None,
         db: Optional[DtcDatabase] = None,
         mock: bool = False,
         port: Optional[str] = None,
         list_ports: Optional[PortLister] = None,
         transport_for_port: Optional[TransportForPort] = None,
-        protocol: str = "auto",
         verbose: bool = False,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
         pids: Optional[PidDatabase] = None,
@@ -141,7 +141,6 @@ class TrecuApp(App):
         self._db = db or DtcDatabase.load_default()
         self._pids = pids or PidDatabase.load_default()
         self._mock = mock
-        self._protocol = protocol
         self._poll_interval = poll_interval
         # F1: one long-lived session, connected once and held open with a
         # keepalive ticker — reused across reads/clears/live polls instead of
@@ -154,13 +153,10 @@ class TrecuApp(App):
             db=self._db,
             pids=self._pids,
             logger=self._ecu_logger,
-            protocol=protocol,
             verbose=verbose,
             keepalive_interval=keepalive_interval,
-            progress=self._on_connect_probe,
         )
-        # None = let the service pick the source-appropriate default set (OBD
-        # DEFAULT_LIVE_PIDS, or every kwp_local channel on the KWP path).
+        # None = let the service use its own DEFAULT_LIVE_PIDS.
         self._live_pids = list(live_pids) if live_pids is not None else None
         self._port = port or ("mock ECU" if mock else None)
         # Used only when no port is known yet and the user must choose one.
@@ -515,10 +511,7 @@ class TrecuApp(App):
     def _refresh_connection_card(self) -> None:
         mode = "Mock" if self._mock else "Serial"
         port = self._port or "—"
-        if self._last and self._last.protocol:
-            proto = self._last.protocol
-        else:
-            proto = self._protocol or "—"
+        proto = (self._last.protocol if self._last else "") or PROTOCOL_ISO9141
         lines = [
             f"[b]{'Mode':<10}[/]{mode}",
             f"[b]{'Port':<10}[/]{port}",
@@ -576,19 +569,6 @@ class TrecuApp(App):
         self._connecting_screen = scr
         self.push_screen(scr)
 
-    def _on_connect_probe(self, protocol: str) -> None:
-        """Service connect-progress hook (runs on the worker thread).
-
-        Marshals the protocol label the auto-sweep is about to try onto the UI
-        thread, so the modal reflects which one is being probed right now.
-        """
-        self.call_from_thread(self._update_connecting_protocol, protocol)
-
-    def _update_connecting_protocol(self, protocol: str) -> None:
-        scr = self._connecting_screen
-        if scr is not None:
-            scr.set_probing(protocol)
-
     def _dismiss_connecting(self) -> None:
         scr, self._connecting_screen = self._connecting_screen, None
         if scr is not None and scr in self.screen_stack:
@@ -603,9 +583,9 @@ class TrecuApp(App):
         :meth:`SessionController.cancel` force-closes the in-flight transport so
         the connect thread's blocked read unwinds; here we drop the modal and
         hand straight back to the **port picker** (if a port lister is
-        configured) or the ready state, *without* waiting for that thread — on a
-        slow ``auto`` init sweep that wait would be many seconds, which is what
-        would make Cancel feel dead. The doomed connect is discarded by the
+        configured) or the ready state, *without* waiting for that thread — a
+        5-baud init working through its retry budget can take many seconds,
+        which is what would make Cancel feel dead. The doomed connect is discarded by the
         controller, which never publishes it as the session, so a re-picked
         (even different) port still gets a clean, non-overlapping session.
         """

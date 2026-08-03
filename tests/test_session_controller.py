@@ -19,7 +19,6 @@ from mock_ecus import (
 
 
 def _controller(factory, **kw) -> SessionController:
-    kw.setdefault("protocol", "iso9141")
     kw.setdefault("keepalive_interval", 0)
     return SessionController(transport_factory=factory, **kw)
 

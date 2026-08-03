@@ -26,9 +26,9 @@ def test_connecting_modal_shown_then_dismissed_on_success(mock_app):
         async with app.run_test() as pilot:
             await pilot.pause(0.2)  # auto-read starts; connect stalls in init
             assert isinstance(app.screen, ConnectingScreen)
-            # The modal names the port and the protocol currently being probed.
+            # The modal names the port and what it is doing on it.
             assert app.screen._port == "mock"
-            assert app.screen._protocol == "iso9141"
+            assert "5-baud init" in str(app.screen.query_one("#detail").render())
             gate.set()  # let the handshake complete
             await pilot.pause(0.8)
             assert not isinstance(app.screen, ConnectingScreen)
@@ -61,7 +61,7 @@ def test_connecting_modal_cancel_abandons_connect(mock_app):
 
 def test_cancel_returns_to_port_selection_when_lister_configured(picker_app):
     gate = threading.Event()
-    app = picker_app(lambda d: GatedObdTransport(gate), protocol="iso9141")
+    app = picker_app(lambda d: GatedObdTransport(gate))
 
     async def scenario():
         async with app.run_test() as pilot:
@@ -91,7 +91,7 @@ def test_connect_error_shows_modal_then_returns_to_port_picker(picker_app):
     # A failing fresh connect surfaces a ConnectErrorScreen; OK hands back to
     # the port picker so the user can pick a (different) port and retry.
     app = picker_app(
-        lambda d: FailingObdTransport(), config=FAIL_FAST, protocol="iso9141"
+        lambda d: FailingObdTransport(), config=FAIL_FAST
     )
 
     async def scenario():
@@ -195,7 +195,7 @@ def test_cancel_button_on_picker_after_connect_cancel_quits_app(picker_app):
     # button is activated, exactly like the startup picker — even while the
     # abandoned connect thread is still blocked (gate never released here).
     gate = threading.Event()
-    app = picker_app(lambda d: GatedObdTransport(gate), protocol="iso9141")
+    app = picker_app(lambda d: GatedObdTransport(gate))
 
     async def scenario():
         async with app.run_test() as pilot:

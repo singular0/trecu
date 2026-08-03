@@ -9,15 +9,13 @@ bike's diagnostic connector.
 
 ## Features
 
-- **Auto-detected protocol** — ISO 9141-2 (5-baud slow init + OBD-II, the usual
-  Sagem Triumph path), KWP2000 with 5-baud init (the Keihin K-line path, with
-  community-reverse-engineered addressing and services), or KWP2000 fast-init
-  — tried in that order automatically, or forced with `--protocol`.
+- **ISO 9141-2 / OBD-II over the K-line** — a 5-baud slow init at `0x33`, then
+  standard OBD-II services. One protocol, the one confirmed on a real Triumph.
 - **ECU identification** — VIN, calibration ID, part number, and ECU name.
 - **Read fault codes** — stored and pending DTCs, decoded to SAE J2012 codes
-  (`P/C/B/U` + 4 hex digits; Keihin-native `K` codes on the legacy KWP read)
-  and described with **official service-manual wording** — the bundled
-  dictionary covers 557 Triumph codes across the `P`/`K`/`C`/`U`/`L` families.
+  (`P/C/B/U` + 4 hex digits) and described with **official service-manual
+  wording** — the bundled dictionary covers 415 Triumph codes across the
+  `P`/`C`/`U` families.
 - **Clear fault codes** — behind a confirmation guard.
 - **Live sensor streaming** — engine RPM, coolant temp, throttle position,
   intake MAP, O2, and battery voltage in a continuously-updating table with
@@ -43,10 +41,13 @@ some Sagem models are reported to use 5-baud init address `0x43` instead of
 the OBD-standard `0x33` — if ISO 9141-2 won't connect, try
 `--init-address 0x43`.)
 
-**Scope: a KKL cable reaches K-line ECUs only** — ISO 9141-2 and ISO 14230
-(KWP2000). Modern CAN-based Triumphs, and the ABS and instrument modules even
-on K-line bikes, talk CAN and are **out of reach for this hardware** — that's
-an ELM327/CAN-interface job (e.g. TuneECU), not a TrECU one.
+**Scope: engine-ECU ISO 9141-2 / OBD-II diagnostics only.** No CAN modules, no
+ABS, no manufacturer-specific service functions, no tuning, no programming.
+Modern CAN-based Triumphs, and the ABS and instrument modules even on K-line
+bikes, talk CAN and are **out of reach for this hardware** — that's an
+ELM327/CAN-interface job (e.g. TuneECU), not a TrECU one. TrECU deliberately
+does not implement the community-derived KWP2000/Keihin path either: it was
+never validated against a bike, so it is not shipped as if it were.
 
 If you want a proven, mature tool with years of real research and broad model
 coverage, use one of these instead — TrECU is not a replacement:
@@ -119,8 +120,7 @@ trecu help
 ```
 
 Diagnostic commands auto-select the cable when exactly one FTDI/KKL device is
-present. Use `--protocol`, `--init-address`, `--ecu-address`,
-`--tester-address`, and `--timeout` to override connection parameters.
+present. Use `--init-address` and `--timeout` to override connection parameters.
 
 When `trecu tui` cannot auto-select a single cable, it opens the port picker.
 Inside the UI, use `r` to read faults, `c` to clear them, `←`/`→` to switch

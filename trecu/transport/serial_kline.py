@@ -2,8 +2,8 @@
 
 A KKL cable (FT232RL + a K-line driver transistor) enumerates through the host's
 FTDI serial (VCP) driver as an ordinary serial port (``/dev/ttyUSB0``,
-``/dev/cu.usbserial-XXXX``, ``COMx``).  We drive it at the KWP2000 line rate
-(10400 baud, 8N1) and perform the fast-init wake-up by toggling the UART break
+``/dev/cu.usbserial-XXXX``, ``COMx``).  We drive it at the ISO 9141-2 line rate
+(10400 baud, 8N1) and bit-bang the 5-baud init by toggling the UART break
 condition, which pulls the K-line.
 """
 
@@ -50,7 +50,6 @@ class KLineSerialTransport(Transport):
     """Talk to the ECU over a serial-attached KKL cable."""
 
     echoes = True  # single-wire K-line reflects our TX into our RX
-    supports_fast_init = True
     supports_slow_init = True
 
     def __init__(self, port: str, baudrate: int = 10400, read_timeout: float = 0.2):
@@ -122,20 +121,8 @@ class KLineSerialTransport(Transport):
                 break
         return bytes(buf)
 
-    def fast_init(self, low_ms: int = 25, high_ms: int = 25) -> None:
-        dev = self._dev
-        self.reset_input()
-        try:
-            dev.break_condition = True          # pull K-line low
-            time.sleep(low_ms / 1000.0)
-            dev.break_condition = False         # release: line goes high (idle)
-            time.sleep(high_ms / 1000.0)
-        except (OSError, ValueError) as exc:
-            raise TransportError(f"fast-init line toggle failed: {exc}") from exc
-        self.reset_input()
-
     def five_baud_init(self, address: int) -> None:
-        """ISO 9141 / ISO 14230 5-baud slow init.
+        """ISO 9141-2 5-baud slow init.
 
         Bit-bangs the address byte at 5 baud using the break condition, with
         the waveform other K-line tools drive on an FTDI cable: a 100 ms

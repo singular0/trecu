@@ -1,6 +1,6 @@
 """Transport abstraction for the single-wire K-line.
 
-A KKL cable exposes the ISO 9141 / ISO 14230 K-line as a plain serial port.
+A KKL cable exposes the ISO 9141-2 K-line as a plain serial port.
 The line is half-duplex and single-wire, so anything the tester transmits is
 electrically reflected back into its own receiver (the "echo").  Concrete
 transports advertise whether they echo via :attr:`Transport.echoes`; the
@@ -17,12 +17,10 @@ class TransportError(Exception):
 
 
 class Transport(abc.ABC):
-    """Abstract half-duplex byte transport with KWP2000 init timing."""
+    """Abstract half-duplex byte transport with the 5-baud init waveform."""
 
     #: True when bytes written are reflected back into the read buffer.
     echoes: bool = False
-    #: Whether this transport can perform the KWP2000 fast-init line pulse.
-    supports_fast_init: bool = True
     #: Whether this transport can perform the ISO 9141 5-baud slow init.
     supports_slow_init: bool = False
 
@@ -50,31 +48,19 @@ class Transport(abc.ABC):
         timeout.
         """
 
-    # -- Init waveforms: both optional, gated by the capability flags ----------
-    # Neither init is abstract.  A transport implements whichever waveform its
-    # device can actually drive and advertises that through
-    # :attr:`supports_fast_init` / :attr:`supports_slow_init`, which is what the
-    # protocol layer branches on — a client refuses to ``connect()`` over a
-    # transport whose flag is False rather than calling and catching.  The
-    # defaults below are only the backstop for a caller that ignored the flag,
-    # so a mock that does one init does not have to implement-and-raise the
-    # other.
-
-    def fast_init(self, low_ms: int = 25, high_ms: int = 25) -> None:
-        """Perform the ISO 14230-2 fast-init wake-up pattern on the K-line.
-
-        Holds the line low for ``low_ms`` then high for ``high_ms`` before the
-        caller sends the StartCommunication request.  Implemented only by
-        transports declaring :attr:`supports_fast_init`.
-        """
-        raise TransportError("fast init is not supported by this transport")
+    # -- Init waveform: optional, gated by the capability flag ------------------
+    # The init is not abstract.  A transport implements the waveform only if its
+    # device can actually drive it and advertises that through
+    # :attr:`supports_slow_init`, which is what the protocol layer branches on —
+    # a client refuses to ``connect()`` over a transport whose flag is False
+    # rather than calling and catching.  The default below is only the backstop
+    # for a caller that ignored the flag, so a plain byte-pipe transport does not
+    # have to implement-and-raise it.
 
     def five_baud_init(self, address: int) -> None:
-        """Perform a 5-baud slow-init address handshake.
+        """Perform the ISO 9141-2 5-baud slow-init address handshake.
 
-        Not all ECUs need this; fast-init is the common Triumph path (though the
-        confirmed real-bike one is slow init).  Implemented only by transports
-        declaring :attr:`supports_slow_init`.
+        Implemented only by transports declaring :attr:`supports_slow_init`.
         """
         raise TransportError("5-baud slow init is not supported by this transport")
 

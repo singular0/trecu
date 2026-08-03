@@ -4,7 +4,6 @@ import pytest
 
 from trecu.protocol.pids import (
     FormulaError,
-    KwpLocalTable,
     PidDatabase,
     PidDef,
     SensorReading,
@@ -96,53 +95,13 @@ def test_reading_formatting_integer_vs_decimal():
     assert SensorReading(0, "x", 13.80, "V").formatted() == "13.8"
 
 
-# -- KwpLocalTable (packed Keihin 21 80 frame, draft layout) ------------------
-def test_kwp_local_table_loads_from_its_own_file():
-    assert len(PidDatabase.load_default()) == 19   # mode01 file is independent
-    table = KwpLocalTable.load_default()
-    assert table.lid == 0x80                   # Keihin's MODE_READ_SENSORS RLI
-    assert len(table) == 53                    # full Keihin channel table
-    for idx in (0, 3, 5, 50):                  # RPM, water temp, gear, battery
-        assert idx in table
-
-
-def test_kwp_local_decode_frame_applies_draft_formulas():
-    table = KwpLocalTable.load_default()
-    frame = bytearray(106)
-    frame[6:8] = (115).to_bytes(2, "big")      # ch 3 water temp: 115 - 25 = 90
-    frame[10:12] = (4).to_bytes(2, "big")      # ch 5 gear
-    frame[50:52] = (58).to_bytes(2, "big")     # ch 50 battery: 5.8 + 8 = 13.8
-    by_ch = {r.pid: r for r in table.decode_frame(bytes(frame))}
-    assert len(by_ch) == 53
-    assert by_ch[3].value == 90 and by_ch[3].unit == "°C"
-    assert by_ch[5].value == 4
-    assert by_ch[50].value == 13.8 and by_ch[50].unit == "V"
-    assert by_ch[66].value == -1024            # zero slot -> the channel's offset
-
-
-def test_kwp_local_decode_frame_filters_and_orders_by_request():
-    table = KwpLocalTable.load_default()
-    readings = table.decode_frame(bytes(106), channels=[50, 3, 999])
-    assert [r.pid for r in readings] == [50, 3]  # unknown channel dropped
-
-
-def test_kwp_local_decode_frame_drops_channels_beyond_short_frame():
-    table = KwpLocalTable.load_default()
-    readings = table.decode_frame(bytes(10))   # only the first 5 slots present
-    assert {r.pid for r in readings} == {0, 1, 2, 3, 4}
-
-
-# -- the load/lookup half both tables share -----------------------------------
-def test_both_tables_share_one_load_and_lookup_surface():
-    """The two tables decode differently but load identically; each names its
-    own bundled file and its own id vocabulary over the shared machinery."""
-    obd, keihin = PidDatabase.load_default(), KwpLocalTable.load_default()
-    assert (PidDatabase.data_file, KwpLocalTable.data_file) == (
-        "obd_sensors.json",
-        "keihin_sensors.json",
-    )
-    for table, ids in ((obd, obd.pids()), (keihin, keihin.channels())):
-        assert ids == sorted(ids) and len(ids) == len(table)
-        assert all(i in table for i in ids)
-        assert table.get(ids[0]) is not None
-        assert table.get(0xDEAD) is None
+# -- the load/lookup surface --------------------------------------------------
+def test_table_load_and_lookup_surface():
+    """One bundled file, one id vocabulary, ascending ids, honest membership."""
+    db = PidDatabase.load_default()
+    assert PidDatabase.data_file == "obd_sensors.json"
+    ids = db.pids()
+    assert ids == sorted(ids) and len(ids) == len(db)
+    assert all(i in db for i in ids)
+    assert db.get(ids[0]) is not None
+    assert db.get(0xDEAD) is None

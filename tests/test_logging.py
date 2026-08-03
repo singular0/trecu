@@ -2,8 +2,6 @@
 
 from trecu.cli import main
 from trecu.logging import Logger
-from trecu.protocol.kwp2000 import Kwp2000Client
-from trecu.transport.mock_kline import MockKLineTransport
 
 
 def test_logger_filters_debug_but_keeps_warnings() -> None:
@@ -17,7 +15,7 @@ def test_logger_filters_debug_but_keeps_warnings() -> None:
 
 
 def test_debug_cli_enables_protocol_debug_messages(capsys) -> None:
-    args = ["faults", "--mock", "--protocol", "iso9141"]
+    args = ["faults", "--mock"]
 
     assert main(args) == 0
     normal = capsys.readouterr()
@@ -36,19 +34,3 @@ def test_debug_cli_enables_protocol_debug_messages(capsys) -> None:
     assert "OBD ECU status:" in debug.err
     assert "ECU operation complete: decoded" in debug.err
     assert "Connected via iso9141." not in debug.out
-
-
-def test_kwp_debug_identifies_services_and_results() -> None:
-    messages = []
-    transport = MockKLineTransport()
-    transport.open()
-    try:
-        client = Kwp2000Client(transport, logger=messages.append)
-        client.connect()
-        client.read_dtcs()
-    finally:
-        transport.close()
-
-    assert any("KWP request: StartCommunication (0x81)" in m for m in messages)
-    assert any("KWP response: StartDiagnosticSession acknowledged" in m for m in messages)
-    assert any("KWP ECU reported 3 stored DTC(s)" in m for m in messages)
