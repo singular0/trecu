@@ -200,7 +200,7 @@ class Iso9141Client:
         return bytes(buf)
 
     # -- high level ----------------------------------------------------------
-    def _read_status_strict(self) -> Tuple[bool, int]:
+    def _read_status(self) -> Tuple[bool, int]:
         """Mode 01 PID 01 -> (MIL on?, stored DTC count); raises if unanswered.
 
         On the real Sagem ECU, Mode 01 PID 01 answers reliably where Mode 03
@@ -217,13 +217,6 @@ class Iso9141Client:
             a = resp[2]
             return (bool(a & 0x80), a & 0x7F)
         raise ProtocolError(f"unexpected Mode 01 PID 01 response: {self._hex(resp)}")
-
-    def read_status(self) -> Tuple[bool, int]:
-        """Best-effort Mode 01 PID 01 -> (MIL on?, stored DTC count)."""
-        try:
-            return self._read_status_strict()
-        except ProtocolError:
-            return (False, 0)
 
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
@@ -342,7 +335,7 @@ class Iso9141Client:
         PID 01 reply surfaces as a hard error (dead session) instead of a false
         "no codes". Pending (Mode 07) is best-effort — unsupported on some ECUs.
         """
-        mil, count = self._read_status_strict()
+        mil, count = self._read_status()
         self._log.debug(
             f"OBD ECU status: MIL={'on' if mil else 'off'}, "
             f"{count} stored DTC(s) expected"

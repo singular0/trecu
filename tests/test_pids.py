@@ -136,16 +136,3 @@ def test_both_tables_share_one_load_and_lookup_surface():
         assert all(i in table for i in ids)
         assert table.get(ids[0]) is not None
         assert table.get(0xDEAD) is None
-
-
-def test_load_file_reads_either_table_shape(tmp_path):
-    obd = tmp_path / "obd.json"
-    obd.write_text('{"0C": {"name": "RPM", "bytes": 2, "formula": "(A*256+B)/4"}}')
-    keihin = tmp_path / "keihin.json"
-    keihin.write_text(
-        '{"lid": "80", "channels": {"0": {"name": "RPM", "bytes": 2, '
-        '"formula": "A*256+B", "frame_offset": 0}}}'
-    )
-    assert PidDatabase.load_file(str(obd)).pids() == [0x0C]
-    table = KwpLocalTable.load_file(str(keihin))
-    assert table.lid == 0x80 and table.channels() == [0]

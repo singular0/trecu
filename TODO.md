@@ -1,6 +1,6 @@
 # trecu — architecture review & cleanup backlog
 
-An architecture review of the current tree (~5,000 lines of `trecu/`, 182 tests
+An architecture review of the current tree (~5,000 lines of `trecu/`, 181 tests
 passing in ~56 s), captured as actionable work. This is **maintenance and
 structural debt**, distinct from `ROADMAP.md`, which tracks *features* by phase.
 Nothing here changes what the tool does; it changes how cheaply the roadmap
@@ -213,7 +213,7 @@ in the service and in the TUI's `SessionController` / `TrecuApp`.
       are each a single call into the shared loop, which also absorbed the
       `supports_slow_init` refusal both were doing themselves.
 - [x] Gave `PidDatabase` / `KwpLocalTable` a `_SensorTable` base for the
-      load/lookup half (`data_file` + `load_default`/`load_file`, `__len__`,
+      load/lookup half (`data_file` + `load_default`, `__len__`,
       `__contains__`, `get`, `ids`). Each subclass keeps its own `from_dict`
       (the two files have different shapes), its own id vocabulary
       (`pids()`/`channels()`), and its own decode surface.
@@ -286,18 +286,36 @@ discovered at release time.
       `pids.format_value()` is now the one formatter, and
       `SensorReading.formatted()` delegates to it.
 
-## 9. Dead / speculative API
+## 9. Dead / speculative API — **done**
 
-No callers outside their own module (or tests only):
+Five members with no callers outside their own module (or tests only), all
+deleted. Nothing in `trecu/` called any of them, so no behaviour moved:
 
-- `PidDatabase.decode_all` (`pids.py:287`)
-- `load_file` classmethods — `pids.py:174,246`, `dtc.py:125`
-- `_mock_live.supported_pids()`
-- `EcuInfo.summary()` (`kwp2000.py:294`) — the spine it fed is gone
-- `Iso9141Client.read_status` (`iso9141.py:241`) — exists only for one test
+- [x] `PidDatabase.decode_all` — the live path decodes through
+      `PidDatabase.decode` / `KwpLocalTable.decode_frame`. (`DtcDatabase.decode_all`
+      is a *different* class and stays — `service.py:413` is its caller.)
+- [x] The three `load_file` classmethods (`_SensorTable`, `DtcDatabase`), and
+      the `--pid-table FILE` idea they were being held for. F4's
+      "fix the draft layout" story is a data-only edit to the bundled
+      `keihin_sensors.json`, which `load_default` already reads — a path
+      override buys nothing there. Re-add both together if that changes.
+- [x] `_mock_live.supported_pids()`.
+- [x] `EcuInfo.summary()` — the one-line spine it fed is gone. `as_rows()` (the
+      Dashboard identity card and `trecu info`) is the live one.
+- [x] `Iso9141Client.read_status` — a best-effort wrapper that swallowed the
+      very `ProtocolError` `read_dtcs` depends on (see "Known real-hardware
+      facts": a silent PID 01 means a dead session, not zero faults), kept alive
+      by one test. With the lenient twin gone, `_read_status_strict` is just
+      `_read_status`, its only caller `read_dtcs`.
 
-- [ ] Delete, **except** `load_file`: keep it only if a `--pid-table FILE` flag
-      gets wired, which F4's data-only-fix story would actually benefit from.
+Suite is 181 tests: `test_load_file_reads_either_table_shape` went with the
+loaders (both `from_dict` shapes are still covered via `load_default` in
+`test_both_tables_share_one_load_and_lookup_surface`). `decode_all` and
+`supported_pids` had no test at all. The other two kept theirs —
+`test_ecu_info_rows` dropped one assertion, and `test_client_connect_and_status`
+now calls `client._read_status()`, the deliberate exception to "test the public
+surface": the MIL-bit/count parse has no other direct assertion, and `read_dtcs`
+only exercises it incidentally.
 
 ## 10. `CLAUDE.md` has drifted from the code
 
@@ -307,7 +325,7 @@ It steers every future session here, so its errors compound.
       `-v`. The CLI is now subcommands: `tui|ports|faults|info|sensors|clear|
       version|help` with `--debug` (`cli.py:36-78`). `README.md` is correct;
       `CLAUDE.md` is not.
-- [x] "88 tests, ~21s" → 182 tests, ~56 s (fixed with §5, which moved the
+- [x] "88 tests, ~21s" → 181 tests, ~56 s (fixed with §5, which moved the
       count; the other three bullets here are untouched).
 - [ ] "There is **no PyPI publish** — install is from the release wheel URL" —
       but `release.yml:109-128` has a Trusted-Publishing PyPI job (commit

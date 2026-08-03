@@ -17,7 +17,7 @@ mirrors the DTC mock/DB sync note in ``CLAUDE.md``).
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 
 def _u8(v: float) -> bytes:
@@ -75,11 +75,6 @@ def kwp_live_frame(tick: int) -> bytes:
         raw = _u16(to_raw(base + amplitude * math.sin(tick * freq)))
         frame[2 * slot : 2 * slot + 2] = raw
     return bytes(frame)
-
-
-def supported_pids() -> List[int]:
-    """PIDs the mock ECUs model with live values."""
-    return sorted(_SENSORS)
 
 
 def sensor_data(pid: int, tick: int) -> Optional[bytes]:

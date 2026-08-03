@@ -121,12 +121,6 @@ class DtcDatabase:
             data = json.load(fh)
         return cls(data.get("codes", {}))
 
-    @classmethod
-    def load_file(cls, path: str) -> "DtcDatabase":
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return cls(data.get("codes", data))
-
     def __len__(self) -> int:
         return len(self._entries)
 

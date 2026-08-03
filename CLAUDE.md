@@ -23,7 +23,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (182 tests, ~56s, no hardware)
+./.venv/bin/python -m pytest              # full suite (181 tests, ~56s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # launch the TUI against a simulated ECU
 ./.venv/bin/trecu --mock --read           # headless read + print + exit

@@ -186,11 +186,6 @@ class _SensorTable:
         return cls.from_dict(_load_data_json(cls.data_file))
 
     @classmethod
-    def load_file(cls: Type[TableT], path: str) -> TableT:
-        with open(path, "r", encoding="utf-8") as fh:
-            return cls.from_dict(json.load(fh))
-
-    @classmethod
     def from_dict(cls: Type[TableT], data: dict) -> TableT:
         raise NotImplementedError
 
@@ -311,11 +306,3 @@ class PidDatabase(_SensorTable):
             max=d.max,
             raw=bytes(data[: d.num_bytes]),
         )
-
-    def decode_all(self, raw: Iterable[tuple]) -> List[SensorReading]:
-        """Decode ``(pid, data_bytes)`` pairs, skipping PIDs not in the table."""
-        out: List[SensorReading] = []
-        for pid, data in raw:
-            if pid in self._defs:
-                out.append(self.decode(pid, data))
-        return out

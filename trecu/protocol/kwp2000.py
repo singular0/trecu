@@ -345,10 +345,6 @@ class EcuInfo:
             rows.append(("Calibration", self.calibration_id))
         return rows
 
-    def summary(self) -> str:
-        """Compact one-line identity for a status bar."""
-        return " · ".join(v for v in (self.ecu_name, self.vin) if v)
-
 
 @runtime_checkable
 class EcuClient(Protocol):

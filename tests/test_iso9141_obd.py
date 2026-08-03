@@ -72,7 +72,7 @@ def test_client_connect_and_status():
     client = Iso9141Client(t)
     info = client.connect()
     assert info.key_bytes == b"\x08\x08"
-    mil, count = client.read_status()
+    mil, count = client._read_status()
     assert mil is True and count == 1
     assert client.read_dtcs() == [(0x11, 0x08, 0x08)]
     t.close()

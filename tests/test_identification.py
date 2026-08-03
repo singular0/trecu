@@ -78,8 +78,7 @@ def test_service_omits_identity_when_empty():
         assert result.ecu_info is None
 
 
-def test_ecu_info_rows_and_summary():
+def test_ecu_info_rows():
     info = EcuInfo(vin="V1", calibration_id="C1", ecu_name="E1")
     assert info.as_rows() == [("ECU", "E1"), ("VIN", "V1"), ("Calibration", "C1")]
-    assert info.summary() == "E1 · V1"
     assert EcuInfo().is_empty
