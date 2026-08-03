@@ -303,7 +303,7 @@ class Kwp2000Config:
     # ReadEcuIdentification record-local-identifiers (model/ECU-specific; set
     # any to None to skip). Defaults are from the community Triumph identifier
     # list (0xA0, 0xAE, 0x8C); which record carries which field is unconfirmed on
-    # hardware (roadmap F4) — the standard KWP assignments (0x90 VIN / 0x91
+    # hardware (see TODO.md) — the standard KWP assignments (0x90 VIN / 0x91
     # hardware / 0x94 software) remain available as overrides.
     id_vin_rli: Optional[int] = 0xA0
     id_hardware_rli: Optional[int] = 0xAE

@@ -42,7 +42,7 @@ _AUTO_ORDER = (PROTOCOL_ISO9141, PROTOCOL_KWP_SLOW, PROTOCOL_KWP_FAST)
 # (KWP2000 P3max, ISO 9141-2) is ~5 s, so beat comfortably under that.
 DEFAULT_KEEPALIVE_INTERVAL = 2.0
 
-# Phase 3 live streaming. The default poll set is the roadmap's core dashboard
+# Live streaming. The default poll set is the core dashboard
 # sensors; the cadence is the poll loop's target interval (the TUI's own timer).
 # RPM, coolant, throttle, MAP, O2 sensor 1, battery voltage.
 DEFAULT_LIVE_PIDS = (0x0C, 0x05, 0x11, 0x0B, 0x14, 0x42)

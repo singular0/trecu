@@ -2,9 +2,8 @@
 
 The UI is a persistent *session* with a title bar over a set of tabbed views:
 a **Dashboard** (faults + ECU identity cards), the **Fault Codes** table, and
-the raw protocol **Log**. See the "TUI: the tabbed session shell" section of
-``ROADMAP.md`` for the concept and how live-data / throttle-sync tabs slot in
-later.
+the raw protocol **Log**. ``TODO.md`` tracks the remaining live-data controls
+and throttle-sync view.
 """
 
 from __future__ import annotations
@@ -319,7 +318,7 @@ class TrecuApp(App):
         self.refresh_bindings()
         # Switching *to* Live Data retasks the ECU to streaming; leaving it
         # pauses the poll loop (the half-duplex "active view is what the session
-        # is doing" model — see the TUI section of ROADMAP.md).
+        # is doing" model).
         self._sync_live_polling()
         self._focus_active_tab()
 

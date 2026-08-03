@@ -4,7 +4,7 @@ Parallel to :mod:`trecu.protocol.dtc`: where ``dtc.py`` turns DTC byte triples
 into SAE J2012 codes + descriptions, this turns a PID's raw data bytes into a
 physical value using the model-value tables in ``trecu/data/`` — the
 standardized OBD PIDs in ``obd_sensors.json`` and the Triumph Keihin
-packed-frame channels in ``keihin_sensors.json`` (roadmap F2). It is the
+packed-frame channels in ``keihin_sensors.json``. It is the
 "sensor-decode layer" Phase 3 slots in below the service.
 
 Each PID descriptor carries a **formula** — an expression over the data bytes
@@ -221,7 +221,7 @@ class KwpLocalTable(_SensorTable):
     frame) and splits such a frame into :class:`SensorReading`\\ s. Backed by
     its own ``trecu/data/keihin_sensors.json``; the bundled layout, divisors,
     and offsets are a **draft** pending a hardware capture of a real ``21 80``
-    response (roadmap F4) — fixing them is a data-only edit to that file.
+    response (see TODO.md) — fixing them is a data-only edit to that file.
     """
 
     data_file: ClassVar[str] = "keihin_sensors.json"

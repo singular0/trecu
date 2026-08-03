@@ -58,7 +58,7 @@ def test_table_entry_without_a_usable_formula_fails_as_a_formula_error():
 def test_database_loads_default_pids():
     db = PidDatabase.load_default()
     assert len(db) >= 15
-    for pid in (0x0C, 0x05, 0x11, 0x0B, 0x14, 0x42):  # roadmap's core dashboard set
+    for pid in (0x0C, 0x05, 0x11, 0x0B, 0x14, 0x42):  # core dashboard set
         assert pid in db
 
 

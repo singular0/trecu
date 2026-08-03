@@ -163,7 +163,8 @@ codes the user clears stay cleared across connects. `service.transport` is the
 device currently held, `None` once closed. The TUI's `SessionController` still
 builds **one service per connect attempt** — not because a service is single-use,
 but because a cancelled attempt keeps running inside *its* service's `_io_lock`
-and must not tear down a newer session (see §2 of `TODO.md`).
+and must not tear down a newer session; the attempt-isolation rationale is
+documented beside `SessionController.build_service`.
 
 **Two lifecycle modes.** One-shot (`with service:` → `open`/`close`) still
 connects lazily on the first operation — that's the path the CLI's
@@ -317,8 +318,8 @@ formatted by the shared `pids.format_value` — the same helper behind
 `SensorReading.formatted()`, so a reading and its derived min/max round
 identically. Keep new presentation logic in these modules, not in `app.py`.
 
-**The session lives in `SessionController` (`tui/session.py`), not in the app
-(roadmap F1 is done).** That module is deliberately **Textual-free**: it owns the
+**The session lives in `SessionController` (`tui/session.py`), not in the app.**
+That module is deliberately **Textual-free**: it owns the
 *one* long-lived `DiagnosticService` (`_ecu.session`), is the only place the TUI
 constructs one (`build_service`), and holds the **single connect path** — an
 `async connect()` whose blocking work runs in `asyncio.to_thread`, returning a

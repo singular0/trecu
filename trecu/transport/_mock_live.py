@@ -1,8 +1,7 @@
 """Synthetic, *moving* live-sensor values shared by both mock ECUs.
 
-Phase 3 needs the mocks to answer live-data requests with plausible values that
-visibly change, or the live view looks dead (roadmap: "both ECUs must answer
-PID/record requests with plausible, *varying* values"). Both mock ECUs encode
+The mocks answer live-data requests with plausible values that visibly change,
+or the live view looks dead. Both mock ECUs encode
 the same sensor set the same way — so the two protocol paths behave alike in
 tests — and this module is that single source of truth.
 
