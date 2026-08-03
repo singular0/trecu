@@ -30,30 +30,7 @@ capability, **P2** user-facing diagnostics.
      local mock suite completes in a few seconds rather than spending most of
      its time in configured retry sleeps.
 
-2. **P0 — Harden ISO 9141 response parsing.**
-
-   - Reject bad response checksums instead of warning and decoding possibly
-     corrupt bytes.
-   - Validate the complete response header and configured ECU source address,
-     not just the presence of a leading `0x48`. Reject traffic for another
-     module.
-   - Validate the expected positive-response mode and requested PID before data
-     reaches a decoder. Treat an unrelated but well-formed frame as unrelated,
-     not as the current request's answer.
-   - Handle echoed data, leading line noise, concatenated frames, truncated
-     frames, quiet-gap boundaries, and extra bytes deterministically. Never
-     trim to the first `0x48` and accept the remainder without validating its
-     exact frame boundary.
-   - Add bounded multi-frame Mode `09` reassembly for VIN, calibration ID, and
-     ECU name. Define duplicate, missing, and out-of-order fragment handling and
-     an inter-frame timeout; until then, do not claim those fields as supported.
-   - Add negative tests for bad checksums, wrong headers/source addresses,
-     unexpected modes/PIDs, noise, truncation, concatenated frames, and invalid
-     Mode `09` sequences.
-   - **Done when:** corrupt, misaddressed, incomplete, or unrelated traffic
-     cannot surface as an ECU identity, DTC, or sensor reading.
-
-3. **P0 — Add Mode `01` PID auto-detection after connection.**
+2. **P0 — Add Mode `01` PID auto-detection after connection.**
 
    - Immediately after the slow-init handshake, request Mode `01` PID `00` and
      parse its 32-bit support bitmap. Follow PID pages `20`, `40`, `60`, etc.
@@ -78,7 +55,7 @@ capability, **P2** user-facing diagnostics.
      no timeout to a poll, and advertised/answered/decoded states cannot be
      confused.
 
-4. **P1 — Capture and replay the complete non-destructive ISO path.**
+3. **P1 — Capture and replay the complete non-destructive ISO path.**
 
    - Record sanitized raw traces for slow init at `0x33`, including a clean
      `55 08 08` / inverted-address handshake and representative garbled or
@@ -98,7 +75,7 @@ capability, **P2** user-facing diagnostics.
    - **Done when:** the full ISO read-only sequence replays without hardware and
      decoded values agree with trusted references within documented tolerances.
 
-5. **P1 — Make live polling capability-aware, paced, and auditable.**
+4. **P1 — Make live polling capability-aware, paced, and auditable.**
 
    - Replace the single all-sensors cadence with a serialized poll plan: RPM,
      TPS, and MAP at the fastest sustainable tier; oxygen/fuel-trim data at a
@@ -121,15 +98,17 @@ capability, **P2** user-facing diagnostics.
      every displayed value is traceable to raw bytes, and absence/failure states
      are explicit.
 
-6. **P1 — Improve serial discovery and ISO session recovery.**
+5. **P1 — Improve serial discovery and ISO session recovery.**
 
    - Deduplicate macOS device aliases that share the same VID, PID, FTDI serial
      number, USB location, and interface, while preserving genuinely separate
      multi-interface devices. Prefer and remember one stable usable alias.
    - Log slow-init attempt number, address, timing outcome, sync/key bytes, and
      inverted-address validation without making normal output noisy.
-   - Validate transmitted echo exactly and classify missing/mismatched echo
-     separately from a silent ECU response.
+   - Classify a missing versus a mismatched echo separately from a silent ECU
+     response. The echo is already read back and compared exactly, with
+     non-echo bytes handed on as inbound traffic instead of discarded; what is
+     left is surfacing those two failures distinctly rather than as one warning.
    - Define session-loss criteria using a reliable liveness request, then add a
      bounded reconnect policy that rebuilds the transport, repeats PID
      discovery, and resumes polling without racing the old session.
@@ -140,7 +119,7 @@ capability, **P2** user-facing diagnostics.
      failures recover, and a lost session cannot be mistaken for an unsupported
      sensor.
 
-7. **P2 — Add live-data selection and verifiable recording.**
+6. **P2 — Add live-data selection and verifiable recording.**
 
    - Add a sensor picker driven by the session's advertised PID set, showing
      which PIDs TrECU can decode and which are available as raw data only.
@@ -158,15 +137,16 @@ capability, **P2** user-facing diagnostics.
      decoded values remain auditable from raw frames, and recover a valid file
      after routine disconnects.
 
-8. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
+7. **P2 — Validate ISO DTC reads, identification, and clearing on hardware.**
 
    - Preserve Mode `01` PID `01` as the authority for MIL state and stored-DTC
      count, with Mode `03` retries reconciled against it and Mode `07` pending
      codes best-effort. Add replay coverage for inconsistent counts, silence,
      duplicate codes, and recovery after a transient timeout.
-   - Validate Mode `09` identification only after the bounded multi-frame parser
-     from step 2 works against captured responses; otherwise label it
-     unsupported rather than returning plausible partial ASCII.
+   - Validate the bounded multi-frame Mode `09` parser against *captured* bike
+     responses before claiming identification is supported. Its strictness is
+     already in place — a field is complete or reported unavailable, never
+     plausible partial ASCII — but no real ECU has answered it yet.
    - Validate ISO Mode `04` clear-DTC separately on a controlled bike or bench
      target with a known recoverable fault. Preserve the confirmation guard and
      require a valid acknowledgement followed by reconnect/status verification

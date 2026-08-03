@@ -25,7 +25,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (135 tests, ~53s, no hardware)
+./.venv/bin/python -m pytest              # full suite (167 tests, ~60s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
@@ -55,6 +55,13 @@ loop in `asyncio.to_thread`, so poll for the result, never `sleep` a guess).
 gated (5-baud init blocks on an `Event`, for mid-connect assertions) / failing /
 `BytePipeOnly` (a bare transport that cannot slow-init) — plus `FAIL_FAST` (one
 init attempt, no settle wait) and `TWO_PORTS`.
+
+**`tests/test_iso9141_framing.py` is where traffic that must *not* decode
+lives** — bad checksums, foreign modules, wrong modes/PIDs, noise, truncation,
+concatenated frames, echo damage, bad Mode 09 sequences. It scripts raw bytes
+onto the wire (`RawReplyEcu` and friends, local to that file, since
+`MockObdTransport` frames correctly by construction), so put a new negative
+framing case there rather than teaching the shared mock to misbehave.
 
 ## Releasing
 
@@ -112,18 +119,64 @@ is simply omitted) — decoding to physical values is the service's job via the
 sensor-decode layer, not the client's. `keepalive()` holds a persistent session
 open (F1): OBD-II has no TesterPresent service, so it pokes the link with a
 cheap read-only Mode 01 PID 00. `read_identification()` is best-effort (OBD
-Mode 09) — a missing reply yields empty fields, not an error.
+Mode 09) — a missing reply yields empty fields, not an error, and a field is
+**complete or empty**, never the plausible ASCII half of a VIN.
+
+**Nothing reaches a decoder unvalidated.** Every response goes through one seam
+— `Iso9141Client._exchange` — which collects raw bytes, splits them into whole
+checksum-verified frames, and only then matches them to the request in flight.
+The rules it enforces, in order: a `7F <mode> <nrc>` rejection of *this* request
+raises (naming the NRC) rather than falling through to a timeout; a frame must
+carry this request's positive-response mode **and** its echoed PID, or it is
+unrelated traffic and is skipped, not mistaken for the answer; and it must come
+from the module this session is addressing. That module is `Iso9141Config.
+ecu_address` when set, otherwise the address **latched from the first ECU that
+answers** (reset by `connect()`), so a second module on the bus is rejected
+instead of decoded. A bad checksum, a truncated frame, leading line noise, and a
+data field longer than the ISO limit all end up *outside* a frame and are
+discarded with a debug line — there is no "continue best-effort" path any more,
+and no trimming to the first `0x48`. `obd_request()` returns the single matching
+payload; `obd_request_multi()` returns every matching frame's payload, for the
+answers that legitimately span frames (see below).
+
+**A frame holds 7 data bytes, so long answers span frames.** `MAX_DATA_BYTES`
+is the ISO 9141-2 data-field limit (the mode byte plus its data), which caps one
+Mode 03 frame at **three DTC pairs** and makes every Mode 09 string multi-frame.
+The client reassembles both: `_request_dtcs` concatenates the pairs of all `43`
+frames and de-duplicates them (a retransmitted frame must not inflate the count
+`_read_stored` reconciles against), and `_read_vehicle_info` feeds the `49 <pid>
+<seq> <data>` fragments to `reassemble_identification`. Because the frames of
+one answer can be a full P2 gap apart — which looks exactly like end-of-message
+to `_collect` — a multi-frame request waits one extra `frame_gap` window after
+each batch (`_collect_multi`); only those requests pay it, so live polling and
+PID 01 stay at one collect.
 
 **`protocol/common.py` is the home of the shared vocabulary** — everything that
 sits *below* the OBD service layer: `ProtocolError`, `ConnectionInfo`, `EcuInfo`,
 `decode_identification_ascii`, `parse_obd_dtc_pairs` +
-`STATUS_CONFIRMED`/`STATUS_PENDING` for Mode 03/07 responses, and the whole
+`STATUS_CONFIRMED`/`STATUS_PENDING` for Mode 03/07 responses, the data-link
+framing (`split_response_frames` → `ObdFrame`s + leftover junk, `MAX_DATA_BYTES`,
+and `reassemble_identification` for numbered Mode 09 fragments), and the whole
 5-baud slow init (`slow_init_handshake`, the validated one-shot handshake;
 `slow_init_with_retries`, the loop `connect()` calls, which owns the
 retry/settle policy and the transport-capability refusal; and `SlowInitConfig`,
 the timing + retry section `Iso9141Config` *composes* rather than inlines).
 `iso9141.py` imports all of it and stays about OBD requests and responses. Keep
 any new shared type or shared helper in `common.py`.
+
+**`split_response_frames` proves each frame's boundary; it does not guess.**
+ISO 9141-2 has no length byte, so a frame's end is the shortest data length
+whose trailing byte equals the running sum of everything before it — preferring
+a length that also lands on either the end of the buffer or another frame's
+header, so a concatenated response splits where the frames really end rather
+than at the first length whose checksum happens to add up. A checksum-valid
+length that leaves unexplained bytes behind is only a fallback (trailing noise);
+a candidate whose checksum never validates has no end, and its bytes go to
+`junk`. `reassemble_identification` is the strict half of Mode 09: fragments are
+sorted by sequence, an exact duplicate is a retransmission and is ignored, but a
+conflicting duplicate, a gap in the sequence, a sequence not starting at 1, or
+more than `max_frames` fragments all raise — the caller then reports that field
+as unavailable.
 
 **`DiagnosticService` builds exactly one client.** `_build_client()` returns an
 `Iso9141Client` over this session's device and config; `_connect()` calls it
@@ -179,8 +232,14 @@ if you change the client, update this mock to match and vice versa. The
 **`--mock` CLI seeds it with a random, type-varied fault set** from
 `DtcDatabase.random_dtcs` (see the DTC-decoding section) so a demo run shows a
 plausible spread rather than one canned code — hence its Mode 03 serves *every*
-stored DTC (padded to a 3-pair frame when fewer), never capping at three, so a
->3-fault read still reconciles against the Mode 01 PID 01 count. It also serves
+stored DTC, never capping the list, so a >3-fault read still reconciles against
+the Mode 01 PID 01 count. **It frames like a real ECU, because the client now
+validates framing**: `_emit` rejects a payload over `MAX_DATA_BYTES` outright
+(emitting one would be the mock inventing framing no bike produces), so a longer
+answer goes out as several back-to-back frames — three DTC pairs per Mode 03
+frame with the last padded out, and Mode 09 as numbered `49 <pid> <seq> <4
+bytes>` fragments (the 17-character VIN front-padded to a whole frame, as J1979
+specifies). It also serves
 **placeholder** ECU identity (Mode 09) so identification is testable — those
 VIN/calibration strings are invented, not real-bike facts — and answers
 **live-data** requests (Phase 3) with plausible, *moving* values from
@@ -340,7 +399,13 @@ reported to use the 5-baud init address `0x43` rather than the OBD-standard
 `0x33`. Every such value lives in the one `@dataclass` config, `Iso9141Config`,
 with documented defaults, overridable via CLI flags (`--init-address`,
 `--timeout`). When a value might differ per bike, add it to that config rather
-than inlining a constant.
+than inlining a constant. **The response header is a per-bike value too**:
+`response_format` / `response_target` are fixed by ISO 9141-2 (`48 6B`), but the
+third byte is the answering module's own address — `0xD1` on the tested Triumph,
+`0x10`/`0x11` on many cars. That is why `ecu_address` defaults to `None`
+(*latch* whichever module answers first) instead of hardcoding `0xD1`: strict
+addressing without demanding the user know their ECU's address. Set it to pin
+one module from the first request.
 
 **One config, one section.** `DiagnosticService(config=...)` takes an
 `Iso9141Config` or `None` (all defaults) — there is no `EcuConfig` wrapper or
@@ -385,7 +450,10 @@ an override moves the simulated ECU and the tester together.
 ## K-line protocol reference
 
 The single-wire K-line **echoes** everything the tester transmits; the client
-discards that echo before parsing (see the `echoes` transport flag). Each DTC is
+reads back exactly that many bytes and *checks* them (`_consume_echo`) — an
+exact match, optionally behind leading noise, is discarded as the echo, and
+anything else is handed on as inbound traffic rather than thrown away, so a
+missing or garbled echo can't swallow the ECU's reply. Each DTC is
 decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
 `data/triumph_dtc.json`. One path:
 
@@ -395,8 +463,15 @@ decoded per **SAE J2012** (`P/C/B/U` + 4 hex) and looked up in
    bytes; the tester answers with the inverted key byte and the ECU returns the
    inverted address. The client **requires** that inverted-address byte to
    accept the session (a garbled 5-baud frame otherwise looks "connected").
-2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name).
+2. **Mode 09** → vehicle info (PID 02 VIN, 04 calibration ID, 0A ECU name), each
+   reassembled from its numbered `49 <pid> <seq> <4 bytes>` fragments.
 3. **Mode 01 PID 01** → MIL status + DTC count (the reliable authority), read
    *first*; then **Mode 03** (`68 6A F1 03`) → stored DTCs (retried and
-   reconciled against the count); **Mode 07** → pending (best-effort).
+   reconciled against the count, three pairs per frame); **Mode 07** → pending
+   (best-effort).
 4. **Mode 01** per PID → live sensor data (Phase 3); **Mode 04** → clear codes.
+
+Every response frame is `48 6B <ecu> <mode+0x40> <data…> <cs>`, at most
+`MAX_DATA_BYTES` (7) of data field, and is validated on all of those before it
+is decoded — see the "Nothing reaches a decoder unvalidated" section above for
+what gets rejected and why.

@@ -8,6 +8,13 @@ cleared with Mode 04.
 
 Request : 68 6A F1 <mode> [pid] <cs>
 Response: 48 6B <src> <mode+0x40> <data...> <cs>
+
+Nothing reaches a decoder unvalidated: a response is split into whole frames
+with verified checksums (``split_response_frames`` in ``common.py``), then
+matched on header, ECU source address, response mode, and echoed PID. Corrupt,
+misaddressed, truncated, or unrelated traffic is discarded rather than decoded,
+and an answer too long for the 7-byte data field — a >3-DTC Mode 03, any Mode 09
+string — is reassembled from its frames.
 """
 
 from __future__ import annotations
@@ -19,15 +26,19 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
 from .common import (
+    MAX_DATA_BYTES,
     STATUS_CONFIRMED,
     STATUS_PENDING,
     ConnectionInfo,
     EcuInfo,
+    ObdFrame,
     ProtocolError,
     SlowInitConfig,
     decode_identification_ascii,
     parse_obd_dtc_pairs,
+    reassemble_identification,
     slow_init_with_retries,
+    split_response_frames,
 )
 
 # OBD-II (SAE J1979) service/mode identifiers we use.
@@ -37,6 +48,7 @@ MODE_CLEAR_DTC = 0x04
 MODE_PENDING_DTC = 0x07
 MODE_VEHICLE_INFO = 0x09
 POSITIVE_OFFSET = 0x40
+NEGATIVE_RESPONSE = 0x7F
 
 _MODE_NAMES = {
     MODE_CURRENT_DATA: "current data",
@@ -44,6 +56,17 @@ _MODE_NAMES = {
     MODE_CLEAR_DTC: "clear DTCs",
     MODE_PENDING_DTC: "pending DTCs",
     MODE_VEHICLE_INFO: "vehicle information",
+}
+
+# The negative-response codes J1979 actually uses; anything else is reported
+# by number.
+_NRC_NAMES = {
+    0x11: "service not supported",
+    0x12: "sub-function not supported",
+    0x21: "busy, repeat request",
+    0x22: "conditions not correct",
+    0x31: "request out of range",
+    0x78: "response pending",
 }
 
 # Mode 09 (vehicle information) PIDs.
@@ -56,11 +79,24 @@ VI_PID_ECU_NAME = 0x0A
 class Iso9141Config:
     init_address: int = 0x33               # 5-baud init address
     header: Tuple[int, int, int] = (0x68, 0x6A, 0xF1)  # OBD physical request header
+    # Response framing: `48 6B <ecu>`. The first two bytes are fixed by
+    # ISO 9141-2 (format byte + the tester address an ECU replies to); the third
+    # is the answering module's own address and varies by bike — 0xD1 on the
+    # tested Triumph, 0x10/0x11 on many cars. Left as None it is *latched* from
+    # the first module that answers this session and every later frame must
+    # match it, so traffic from another module is rejected instead of decoded.
+    # Set it explicitly to pin one module from the first request.
+    response_format: int = 0x48
+    response_target: int = 0x6B
+    ecu_address: Optional[int] = None
+    max_data_bytes: int = MAX_DATA_BYTES   # ISO 9141-2 data-field limit
+    max_frames: int = 16                   # bound on frames accepted per response
     baudrate: int = 10400
     p2_timeout: float = 0.8                # max wait for a response
     pending_timeout: float = 0.3           # shorter wait for optional Mode 07
     quiet_gap: float = 0.05                # end-of-message idle gap
     request_gap: float = 0.06              # min idle between requests (P3)
+    frame_gap: float = 0.05                # extra wait for a follow-on frame (P2)
     # 5-baud handshake timing + retry policy (see SlowInitConfig): the
     # physical-layer wake-up, kept apart from these J1979 service timings.
     slow_init: SlowInitConfig = field(default_factory=SlowInitConfig)
@@ -86,6 +122,9 @@ class Iso9141Client:
         self.transport = transport
         self.config = config or Iso9141Config()
         self._log = as_logger(logger, verbose=True)
+        # The module this session talks to: the configured address, or the one
+        # latched from the first ECU that answers. Reset by connect().
+        self._ecu_address: Optional[int] = self.config.ecu_address
 
     # -- helpers -------------------------------------------------------------
     @staticmethod
@@ -107,6 +146,49 @@ class Iso9141Client:
                 break  # got something, then a quiet gap -> message complete
         return bytes(buf)
 
+    def _collect_multi(self, timeout: float) -> bytes:
+        """Collect a response that may span several back-to-back frames.
+
+        The frames of a multi-frame answer are separate messages, so the ECU may
+        leave a full P2 gap between them — long enough to look like the end of
+        the message to :meth:`_collect`. After each batch, wait one more
+        ``frame_gap`` for a follow-on frame; the first silent window ends the
+        response. Only requests whose answer can legitimately span frames pay
+        that extra wait.
+        """
+        buf = bytearray(self._collect(timeout))
+        if not buf:
+            return b""
+        for _ in range(self.config.max_frames):
+            more = self._collect(self.config.frame_gap)
+            if not more:
+                break
+            buf.extend(more)
+        return bytes(buf)
+
+    def _consume_echo(self, frame: bytes) -> bytes:
+        """Swallow the K-line's reflection of ``frame``; return any extra bytes.
+
+        The single-wire line reflects everything transmitted, so the first bytes
+        back are our own. Read exactly that many and check them: an exact match
+        (optionally behind leading line noise) is the echo and is discarded,
+        while anything else is *not* silently thrown away — it is returned to be
+        parsed as inbound traffic, so a missing or mismatched echo surfaces as a
+        framing error on real data rather than eating the ECU's reply.
+        """
+        echoed = self._read_exact(len(frame), self.config.p2_timeout)
+        if echoed == frame:
+            return b""
+        at = echoed.find(frame)
+        if at >= 0:
+            self._log.debug(f"discarded {at} byte(s) of noise before the echo")
+            return echoed[at + len(frame) :]
+        self._log.warning(
+            f"K-line echo mismatch: sent {self._hex(frame)}, "
+            f"read back {self._hex(echoed) or 'nothing'}"
+        )
+        return echoed
+
     # -- init / connect ------------------------------------------------------
     def connect(self) -> ConnectionInfo:
         """5-baud init at ``config.init_address``; the key bytes open the session.
@@ -121,6 +203,9 @@ class Iso9141Client:
             self.config.slow_init,
             log=self._log,
         )
+        # A new session may be a different module: drop any latched address so
+        # it is learned again (a configured one stays pinned).
+        self._ecu_address = self.config.ecu_address
         return ConnectionInfo(key_bytes=key, session_started=True)
 
     def stop_communication(self) -> None:
@@ -139,7 +224,30 @@ class Iso9141Client:
 
     # -- OBD request/response ------------------------------------------------
     def obd_request(self, data: bytes, timeout: Optional[float] = None) -> bytes:
-        """Send an OBD request; return the response payload (mode byte + data)."""
+        """Send an OBD request; return the one matching response payload.
+
+        The payload is the response mode byte (``request mode + 0x40``), the
+        request's echoed PID when it carried one, and the data — all validated
+        before it is returned, so callers may index it without re-checking.
+        Raises :class:`ProtocolError` when nothing valid and related arrives.
+        """
+        return self._exchange(data, timeout, multi=False)[0]
+
+    def obd_request_multi(
+        self, data: bytes, timeout: Optional[float] = None
+    ) -> List[bytes]:
+        """Like :meth:`obd_request` for an answer that may span several frames.
+
+        Mode 03/07 (more than three DTCs) and Mode 09 (any string) exceed the
+        7-byte ISO 9141-2 data field and come back as several frames. Returns
+        every matching frame's payload, in arrival order.
+        """
+        return self._exchange(data, timeout, multi=True)
+
+    def _exchange(
+        self, data: bytes, timeout: Optional[float], *, multi: bool
+    ) -> List[bytes]:
+        """One request/response round trip, validated end to end."""
         cfg = self.config
         timeout = cfg.p2_timeout if timeout is None else timeout
         mode = data[0]
@@ -148,6 +256,18 @@ class Iso9141Client:
             f"OBD request: Mode {mode:02X} ({_MODE_NAMES.get(mode, 'unknown')}), "
             f"data={detail}, timeout={timeout:g}s"
         )
+        raw = self._transmit(data, timeout, multi=multi)
+        self._log.debug(f"<- {self._hex(raw)}")
+        payloads = self._match(self._frames(raw), data)
+        self._log.debug(
+            f"OBD response: Mode {payloads[0][0]:02X}, {len(payloads)} frame(s), "
+            f"{sum(len(p) for p in payloads) - len(payloads)} data byte(s)"
+        )
+        return payloads
+
+    def _transmit(self, data: bytes, timeout: float, *, multi: bool) -> bytes:
+        """Send the request frame and collect the raw bytes that came back."""
+        cfg = self.config
         body = bytes(cfg.header) + data
         frame = body + bytes((sum(body) & 0xFF,))
         t = self.transport
@@ -156,31 +276,108 @@ class Iso9141Client:
         self._log.debug(f"-> {self._hex(frame)}")
         try:
             t.write(frame)
-            if t.echoes:
-                self._read_exact(len(frame), cfg.p2_timeout)  # discard echo
+            leftover = self._consume_echo(frame) if t.echoes else b""
         except TransportError as exc:
             raise ProtocolError(str(exc)) from exc
-
-        raw = self._collect(timeout)
+        collect = self._collect_multi if multi else self._collect
+        raw = leftover + collect(timeout)
         if not raw:
             raise ProtocolError("no OBD response (timeout)")
-        self._log.debug(f"<- {self._hex(raw)}")
-        # Trim any leading noise before the 0x48 response header.
-        start = raw.find(0x48)
-        frame_in = raw[start:] if start >= 0 else raw
-        if len(frame_in) < 5:
-            raise ProtocolError(f"short OBD response: {self._hex(raw)}")
-        if (sum(frame_in[:-1]) & 0xFF) != frame_in[-1]:
-            self._log.warning(
-                "OBD response checksum mismatch (continuing best-effort)"
-            )
-        payload = frame_in[3:-1]  # strip header + checksum -> mode + data
-        response_mode = payload[0] if payload else 0
-        self._log.debug(
-            f"OBD response: Mode {response_mode:02X}, "
-            f"{max(0, len(payload) - 1)} data byte(s)"
+        return raw
+
+    def _frames(self, raw: bytes) -> List[ObdFrame]:
+        """Split ``raw`` into whole, checksum-verified frames — or fail.
+
+        Anything the splitter could not account for is discarded rather than
+        decoded: a bad checksum, a truncated tail, and leading line noise all
+        end up outside a frame, so corrupt bytes can never reach a decoder.
+        """
+        cfg = self.config
+        frames, junk = split_response_frames(
+            raw,
+            fmt=cfg.response_format,
+            target=cfg.response_target,
+            max_data=cfg.max_data_bytes,
         )
-        return payload
+        if junk:
+            self._log.debug(
+                f"discarded {len(junk)} unframed byte(s): {self._hex(junk)}"
+            )
+        if not frames:
+            if bytes((cfg.response_format, cfg.response_target)) in raw:
+                raise ProtocolError(
+                    f"OBD response failed framing/checksum validation: {self._hex(raw)}"
+                )
+            raise ProtocolError(f"no OBD response frame in: {self._hex(raw)}")
+        if len(frames) > cfg.max_frames:
+            raise ProtocolError(
+                f"OBD response exceeded {cfg.max_frames} frames "
+                f"({len(frames)} received)"
+            )
+        return frames
+
+    def _match(self, frames: List[ObdFrame], request: bytes) -> List[bytes]:
+        """The payloads of ``frames`` that actually answer ``request``.
+
+        Three things have to hold before a frame's data reaches a decoder: it
+        must not be a rejection of this request, it must carry this request's
+        positive response mode and echoed PID, and it must come from the module
+        this session is talking to. A well-formed frame failing the middle test
+        is unrelated traffic (another tester's answer, a late reply to an
+        earlier request) and is skipped, not mistaken for this answer.
+        """
+        mode = request[0]
+        pid = request[1] if len(request) > 1 else None
+        self._raise_on_negative(frames, mode)
+        related = [f for f in frames if self._answers(f.payload, mode, pid)]
+        skipped = len(frames) - len(related)
+        if skipped:
+            self._log.debug(f"ignored {skipped} unrelated OBD frame(s)")
+        if not related:
+            raise ProtocolError(
+                f"no Mode {mode:02X} response in: "
+                + "; ".join(self._hex(f.raw) for f in frames)
+            )
+        expected = self._ecu_address
+        if expected is None:
+            expected = related[0].source
+            self._ecu_address = expected
+            self._log.debug(f"ECU source address for this session: {expected:02X}")
+        mine = [f for f in related if f.source == expected]
+        if not mine:
+            raise ProtocolError(
+                f"Mode {mode:02X} response came from module "
+                f"{related[0].source:02X}, expected {expected:02X}"
+            )
+        if len(mine) != len(related):
+            self._log.debug(
+                f"ignored {len(related) - len(mine)} frame(s) from another module"
+            )
+        return [f.payload for f in mine]
+
+    @staticmethod
+    def _answers(payload: bytes, mode: int, pid: Optional[int]) -> bool:
+        """Whether ``payload`` is the positive response to this mode + PID."""
+        if not payload or payload[0] != mode + POSITIVE_OFFSET:
+            return False
+        if pid is None:
+            return True
+        return len(payload) >= 2 and payload[1] == pid
+
+    def _raise_on_negative(self, frames: List[ObdFrame], mode: int) -> None:
+        """Turn a negative response to *this* request into a clear error.
+
+        ``7F <mode> <nrc>`` is the ECU refusing the request — an answer, not
+        silence, so it is worth reporting as such instead of letting the request
+        fall through to a timeout-shaped error.
+        """
+        for frame in frames:
+            p = frame.payload
+            if len(p) >= 3 and p[0] == NEGATIVE_RESPONSE and p[1] == mode:
+                name = _NRC_NAMES.get(p[2], "unknown")
+                raise ProtocolError(
+                    f"ECU rejected Mode {mode:02X}: {name} (NRC {p[2]:02X})"
+                )
 
     def _read_exact(self, count: int, timeout: float) -> bytes:
         deadline = time.monotonic() + timeout
@@ -204,22 +401,19 @@ class Iso9141Client:
         are zero faults — so raise rather than silently return ``(False, 0)``.
         """
         resp = self.obd_request(bytes((MODE_CURRENT_DATA, 0x01)))
-        if (
-            len(resp) >= 3
-            and resp[0] == MODE_CURRENT_DATA + POSITIVE_OFFSET
-            and resp[1] == 0x01
-        ):
-            a = resp[2]
-            return (bool(a & 0x80), a & 0x7F)
-        raise ProtocolError(f"unexpected Mode 01 PID 01 response: {self._hex(resp)}")
+        if len(resp) < 3:  # mode + PID present already; A is the byte we need
+            raise ProtocolError(f"short Mode 01 PID 01 response: {self._hex(resp)}")
+        a = resp[2]
+        return (bool(a & 0x80), a & 0x7F)
 
     def read_live(self, pids: Iterable[int]) -> Dict[int, bytes]:
         """Poll OBD Mode 01 PIDs; return ``{pid: data_bytes}`` for those answered.
 
         One Mode 01 request per PID — widely supported and how other live-data
-        tools poll too. A PID the ECU doesn't answer (timeout, wrong echo) is
-        simply omitted, so a partial dict is normal; the caller decodes whatever
-        came back via the PID table.
+        tools poll too. A PID the ECU doesn't answer, rejects, or answers with a
+        corrupt frame is simply omitted, so a partial dict is normal; the caller
+        decodes whatever came back via the PID table. A PID that *is* answered
+        with all-zero or all-``FF`` data is a real answer and is kept.
         """
         out: Dict[int, bytes] = {}
         for pid in pids:
@@ -227,14 +421,11 @@ class Iso9141Client:
                 resp = self.obd_request(
                     bytes((MODE_CURRENT_DATA, pid)), timeout=self.config.live_timeout
                 )
-            except ProtocolError:
+            except ProtocolError as exc:
+                self._log.debug(f"live PID {pid:02X} unanswered: {exc}")
                 continue
-            # payload: 41 <pid> <data...>
-            if (
-                len(resp) >= 3
-                and resp[0] == MODE_CURRENT_DATA + POSITIVE_OFFSET
-                and resp[1] == pid
-            ):
+            # payload: 41 <pid> <data...>, mode and PID already validated
+            if len(resp) >= 3:
                 out[pid] = bytes(resp[2:])
         return out
 
@@ -243,7 +434,9 @@ class Iso9141Client:
 
         Best-effort: many motorcycle ECUs don't implement Mode 09, so each PID
         is queried with a short timeout and a missing reply yields an empty
-        field rather than an error.
+        field rather than an error. A field is either **complete or empty** —
+        an answer whose fragments don't reassemble cleanly is reported as
+        unavailable rather than as the plausible ASCII half of a VIN.
         """
         raw: Dict[int, bytes] = {}
         vin = self._read_vehicle_info(VI_PID_VIN, raw)
@@ -254,38 +447,48 @@ class Iso9141Client:
         )
 
     def _read_vehicle_info(self, pid: int, raw: Dict[int, bytes]) -> str:
+        """One Mode 09 field, reassembled from its numbered response frames."""
         try:
-            resp = self.obd_request(
+            payloads = self.obd_request_multi(
                 bytes((MODE_VEHICLE_INFO, pid)), timeout=self.config.id_timeout
             )
-        except ProtocolError:
+        except ProtocolError as exc:
+            self._log.debug(f"Mode 09 PID {pid:02X} unavailable: {exc}")
             return ""
-        # Response payload: 49 <pid> <count> <ascii...>
-        if len(resp) < 3 or resp[0] != MODE_VEHICLE_INFO + POSITIVE_OFFSET or resp[1] != pid:
-            return ""
-        data = resp[2:]
-        raw[pid] = bytes(data)
-        return decode_identification_ascii(data)
-
-    def _parse_dtc_response(
-        self, resp: bytes, mode: int, status: int
-    ) -> List[Tuple[int, int, int]]:
-        if not resp or resp[0] != mode + POSITIVE_OFFSET:
-            raise ProtocolError(
-                f"unexpected Mode {mode:02X} response: {self._hex(resp)}"
+        try:
+            # Payloads are 49 <pid> <seq> <data...>; mode and PID are already
+            # validated, so reassembly only has to police the sequence.
+            data = reassemble_identification(
+                payloads, max_frames=self.config.max_frames
             )
-        return parse_obd_dtc_pairs(resp[1:], status)
+        except ProtocolError as exc:
+            self._log.warning(f"Mode 09 PID {pid:02X} discarded: {exc}")
+            return ""
+        raw[pid] = data
+        return decode_identification_ascii(data)
 
     def _request_dtcs(
         self, mode: int, status: int, timeout: Optional[float] = None
     ) -> List[Tuple[int, int, int]]:
         """One DTC request: triples on a positive response (possibly empty).
 
-        Raises :class:`ProtocolError` on no/invalid response, so the caller can
-        tell "the ECU said zero codes" apart from "the ECU never answered".
+        A frame holds at most three DTC pairs, so a longer list arrives as
+        several frames; their pairs are concatenated in order and de-duplicated
+        (a retransmitted frame must not inflate the count the caller reconciles
+        against). Raises :class:`ProtocolError` on no/invalid response, so the
+        caller can tell "the ECU said zero codes" apart from "the ECU never
+        answered".
         """
-        resp = self.obd_request(bytes((mode,)), timeout=timeout)
-        return self._parse_dtc_response(resp, mode, status)
+        payloads = self.obd_request_multi(bytes((mode,)), timeout=timeout)
+        out: List[Tuple[int, int, int]] = []
+        seen = set()
+        for payload in payloads:
+            for hi, lo, sts in parse_obd_dtc_pairs(payload[1:], status):
+                if (hi, lo) in seen:
+                    continue
+                seen.add((hi, lo))
+                out.append((hi, lo, sts))
+        return out
 
     def _read_stored(self, expected: int) -> List[Tuple[int, int, int]]:
         """Read stored DTCs (Mode 03), reconciled against the reliable count.
@@ -355,7 +558,8 @@ class Iso9141Client:
     def clear_dtcs(self) -> None:
         """Clear stored DTCs and turn off the MIL (Mode 04)."""
         self._log.debug("OBD clearing all stored DTCs")
-        resp = self.obd_request(bytes((MODE_CLEAR_DTC,)))
-        if not resp or resp[0] != MODE_CLEAR_DTC + POSITIVE_OFFSET:
-            raise ProtocolError("clear (Mode 04) not acknowledged")
+        try:
+            self.obd_request(bytes((MODE_CLEAR_DTC,)))
+        except ProtocolError as exc:
+            raise ProtocolError(f"clear (Mode 04) not acknowledged: {exc}") from exc
         self._log.debug("OBD clear-DTC request acknowledged")

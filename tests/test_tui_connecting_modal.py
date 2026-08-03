@@ -18,7 +18,7 @@ from trecu.tui.port_select import PortSelectScreen
 from mock_ecus import FAIL_FAST, FailingObdTransport, GatedObdTransport
 
 
-def test_connecting_modal_shown_then_dismissed_on_success(mock_app):
+def test_connecting_modal_shown_then_dismissed_on_success(mock_app, wait_for):
     gate = threading.Event()
     app = mock_app(lambda: GatedObdTransport(gate))
 
@@ -30,7 +30,9 @@ def test_connecting_modal_shown_then_dismissed_on_success(mock_app):
             assert app.screen._port == "mock"
             assert "5-baud init" in str(app.screen.query_one("#detail").render())
             gate.set()  # let the handshake complete
-            await pilot.pause(0.8)
+            # The read lands off the event loop, so poll for it rather than
+            # guessing a sleep: _populate is what settles the state.
+            await wait_for(lambda: app._state == "connected", pilot.pause)
             assert not isinstance(app.screen, ConnectingScreen)
             assert app._ecu.connected
             assert app.query_one("#dtcs").row_count == 1  # the default P1108

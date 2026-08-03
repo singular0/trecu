@@ -7,17 +7,26 @@ P1108 with the MIL on — the deterministic ground truth the test-suite relies
 on.  The ``trecu --mock`` CLI overrides that with a random, type-varied set of
 real DB codes (``DtcDatabase.random_dtcs``) so a demo run shows a plausible
 spread of faults rather than one canned code.
+
+Framing is the real thing too, because the client now validates it: every frame
+carries a correct checksum and at most :data:`MAX_DATA_BYTES` of data, so an
+answer that doesn't fit — more than three DTCs, any Mode 09 string — is emitted
+as several back-to-back frames rather than one oversized one.
 """
 
 from __future__ import annotations
 
 from typing import List, Tuple
 
+from ..protocol.common import MAX_DATA_BYTES
 from ._mock_live import sensor_data
 from .base import Transport
 
 # Default stored fault: 0x1108 -> P1108 (ambient air pressure sensor).
 _DEFAULT_DTCS: List[Tuple[int, int]] = [(0x11, 0x08)]
+
+#: Data bytes per Mode 09 response frame (49 <pid> <seq> fill the rest).
+_VI_FRAGMENT = MAX_DATA_BYTES - 3
 
 
 class MockObdTransport(Transport):
@@ -84,6 +93,18 @@ class MockObdTransport(Transport):
 
     # -- ECU behaviour -------------------------------------------------------
     def _emit(self, payload: bytes) -> None:
+        """Queue one response frame: header + payload + checksum.
+
+        The payload is the ISO 9141-2 data field, so it may not exceed
+        :data:`MAX_DATA_BYTES` — a real ECU splits a longer answer across
+        frames, and the client rejects an oversized one. Emitting one here would
+        be the mock inventing framing no bike produces, so it is an error.
+        """
+        if not 1 <= len(payload) <= MAX_DATA_BYTES:
+            raise ValueError(
+                f"mock ECU frame payload must be 1..{MAX_DATA_BYTES} bytes, "
+                f"got {len(payload)}"
+            )
         frame = self.resp_header + payload
         self._rx.extend(frame + bytes((sum(frame) & 0xFF,)))
 
@@ -108,27 +129,46 @@ class MockObdTransport(Transport):
                     self._live_tick += 1
                     self._emit(bytes((0x41, pid)) + data)
         elif mode == 0x03:  # stored DTCs
-            # Serve *every* stored DTC (padded to a 3-pair frame when there are
-            # fewer): the client reconciles this against the Mode 01 PID 01
-            # count, so capping the list here would make a >3-fault read look
-            # like a count/enumeration mismatch.
-            body = bytearray((0x43,))
+            # Serve *every* stored DTC, three pairs per frame: one frame holds
+            # the mode byte plus three pairs and that fills the data field, so a
+            # longer list is several back-to-back frames, exactly as a real ECU
+            # answers. Capping at one frame would make a >3-fault read look like
+            # a count/enumeration mismatch against Mode 01 PID 01.
             slots = list(self._dtcs)
-            while len(slots) < 3:
-                slots.append((0x00, 0x00))
-            for hi, lo in slots:
-                body += bytes((hi, lo))
-            self._emit(bytes(body))
+            while len(slots) % 3 or not slots:
+                slots.append((0x00, 0x00))  # pad the last frame out to 3 pairs
+            for start in range(0, len(slots), 3):
+                body = bytearray((0x43,))
+                for hi, lo in slots[start : start + 3]:
+                    body += bytes((hi, lo))
+                self._emit(bytes(body))
         elif mode == 0x04:  # clear DTCs + MIL
             self._dtcs.clear()
             self.mil = False
             self._emit(bytes((0x44,)))
         elif mode == 0x09:  # vehicle information (VIN / cal ID / ECU name)
             pid = payload[1] if len(payload) > 1 else 0
-            text = self._vehicle_info.get(pid, "")
-            if text:
-                # 49 <pid> <count=1> <ascii...>
-                self._emit(bytes((0x49, pid, 0x01)) + text.encode("ascii", "ignore"))
+            self._emit_vehicle_info(pid, self._vehicle_info.get(pid, ""))
         elif mode == 0x07:  # pending DTCs — unsupported on this ECU (no reply)
             return
         # anything else: no response, like the real ECU
+
+    def _emit_vehicle_info(self, pid: int, text: str) -> None:
+        """Answer Mode 09 as J1979 does: numbered frames of four data bytes.
+
+        A VIN or calibration ID is far longer than the data field, so the ECU
+        sends ``49 <pid> <seq> <4 bytes>`` frames with ``seq`` counting from 1
+        and the text NUL-padded out to a whole number of frames (front-padded
+        for the 17-character VIN, as J1979 specifies). An empty string means the
+        PID is unsupported: no reply at all.
+        """
+        if not text:
+            return
+        data = text.encode("ascii", "ignore")
+        pad = -len(data) % _VI_FRAGMENT
+        data = b"\x00" * pad + data if pid == 0x02 else data + b"\x00" * pad
+        for seq in range(len(data) // _VI_FRAGMENT):
+            start = seq * _VI_FRAGMENT
+            self._emit(
+                bytes((0x49, pid, seq + 1)) + data[start : start + _VI_FRAGMENT]
+            )

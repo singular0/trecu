@@ -3,16 +3,17 @@
 Everything here sits *below* the OBD-II service layer in ``iso9141.py``: the
 error type, the connection/identity dataclasses the service and UI pass around,
 the 5-baud slow init (an ISO 9141-2 physical-layer handshake, not a J1979
-service), and the small parsers that turn raw response bytes into structured
-values. Keeping them apart from ``iso9141.py`` keeps that module about OBD
-requests and responses.
+service), the data-link framing that turns a collected buffer into exact,
+checksum-verified frames, and the small parsers that turn raw response bytes
+into structured values. Keeping them apart from ``iso9141.py`` keeps that
+module about OBD requests and responses.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..logging import LoggerLike, as_logger
 from ..transport.base import Transport, TransportError
@@ -23,13 +24,20 @@ from ..transport.base import Transport, TransportError
 STATUS_CONFIRMED = 0x08  # decode_status -> "confirmed"
 STATUS_PENDING = 0x04    # decode_status -> "pending"
 
+#: Bytes ahead of a response's data field: format, target, ECU source address.
+RESPONSE_HEADER_LEN = 3
+#: Largest data field ISO 9141-2 carries in one frame — the service/mode byte
+#: plus its data. A longer answer (a >3-DTC Mode 03, any Mode 09 string) is not
+#: one long frame: it arrives as several back-to-back frames, which is why the
+#: splitter below refuses to read past this and the client reassembles.
+MAX_DATA_BYTES = 7
+
 
 def decode_identification_ascii(data: bytes) -> str:
     """Best-effort ASCII text from an identification payload.
 
-    OBD Mode 09 responses wrap the text in a leading count/NODI byte and may
-    zero-pad it.  Keeping only printable ASCII drops both without needing to
-    know the exact framing.
+    Keeps only printable ASCII, dropping the NUL padding ECUs use to fill the
+    last fragment of a Mode 09 string out to a whole frame.
     """
     return "".join(chr(b) for b in data if 0x20 <= b <= 0x7E).strip()
 
@@ -52,6 +60,153 @@ def parse_obd_dtc_pairs(body: bytes, status: int) -> List[Tuple[int, int, int]]:
             continue
         out.append((hi, lo, status))
     return out
+
+
+# -- ISO 9141-2 response framing ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class ObdFrame:
+    """One exact, checksum-valid ISO 9141-2 response frame.
+
+    ``payload`` is the data field — the positive/negative response mode byte
+    and everything after it — with the three header bytes and the trailing
+    checksum already removed and verified.
+    """
+
+    source: int      # third header byte: the module that sent this frame
+    payload: bytes   # mode byte + data
+    raw: bytes       # the frame exactly as it appeared on the wire
+
+
+def _is_frame_start(raw: bytes, at: int, fmt: int, target: int) -> bool:
+    """Whether a response header plausibly begins at ``at``."""
+    return (
+        at + RESPONSE_HEADER_LEN <= len(raw)
+        and raw[at] == fmt
+        and raw[at + 1] == target
+    )
+
+
+def _frame_end(
+    raw: bytes, start: int, fmt: int, target: int, max_data: int
+) -> Optional[int]:
+    """Exact end offset of the frame starting at ``start``, or ``None``.
+
+    ISO 9141-2 carries no length byte, so a frame's end has to be *proved*: the
+    only accepted end is a data length whose trailing byte equals the running
+    sum of every byte before it. A length that also lands on either the end of
+    the buffer or the header of another frame is an exact boundary and wins
+    outright, so a concatenated multi-frame response splits where the frames
+    really end rather than at the first length whose checksum happens to add up.
+    A checksum-valid length that leaves unexplained bytes behind is kept only as
+    a fallback (trailing line noise), and a frame whose checksum never validates
+    has no end at all — the caller must reject it, never decode it.
+    """
+    fallback: Optional[int] = None
+    for data_len in range(1, max_data + 1):
+        end = start + RESPONSE_HEADER_LEN + data_len + 1
+        if end > len(raw):
+            break
+        if (sum(raw[start : end - 1]) & 0xFF) != raw[end - 1]:
+            continue
+        if end == len(raw) or _is_frame_start(raw, end, fmt, target):
+            return end
+        if fallback is None:
+            fallback = end
+    return fallback
+
+
+def split_response_frames(
+    raw: bytes,
+    *,
+    fmt: int,
+    target: int,
+    max_data: int = MAX_DATA_BYTES,
+) -> Tuple[List[ObdFrame], bytes]:
+    """Split a collected buffer into whole response frames plus leftover bytes.
+
+    Returns ``(frames, junk)``. Every frame is header-matched (``fmt`` +
+    ``target``), length-bounded, and checksum-verified; ``junk`` is every byte
+    that was not part of one — leading line noise, a stray echo, a truncated
+    tail, or a frame whose checksum failed. Callers must treat a non-empty
+    ``junk`` as bytes that were *discarded*, and an empty ``frames`` as "no
+    usable response arrived", rather than decoding whatever is left over.
+    """
+    frames: List[ObdFrame] = []
+    junk = bytearray()
+    at = 0
+    while at < len(raw):
+        end = (
+            _frame_end(raw, at, fmt, target, max_data)
+            if _is_frame_start(raw, at, fmt, target)
+            else None
+        )
+        if end is None:
+            junk.append(raw[at])
+            at += 1
+            continue
+        frames.append(
+            ObdFrame(
+                source=raw[at + 2],
+                payload=bytes(raw[at + RESPONSE_HEADER_LEN : end - 1]),
+                raw=bytes(raw[at:end]),
+            )
+        )
+        at = end
+    return frames, bytes(junk)
+
+
+def reassemble_identification(
+    payloads: Sequence[bytes], *, max_frames: int
+) -> bytes:
+    """Join the fragments of a multi-frame Mode 09 response into its data bytes.
+
+    A Mode 09 string does not fit :data:`MAX_DATA_BYTES`, so J1979 splits it
+    over numbered frames: ``49 <pid> <seq> <up to 4 data bytes>``, ``seq``
+    counting from 1. This rebuilds the data in sequence order and is strict
+    about what it accepts, because a half-read VIN that still decodes to
+    plausible ASCII is worse than no VIN at all:
+
+    * out-of-order fragments are fine — they are sorted by ``seq``;
+    * an exact duplicate is a retransmission and is ignored, but a duplicate
+      ``seq`` carrying *different* data is a conflict and rejects the read;
+    * a gap in the sequence (or a sequence not starting at 1) rejects the read
+      — that is the "missing fragment" case;
+    * more than ``max_frames`` fragments rejects the read, bounding what one
+      response can make the client buffer.
+
+    Raises :class:`ProtocolError` on any of those; the caller reports the field
+    as unavailable.
+    """
+    fragments: Dict[int, bytes] = {}
+    for payload in payloads:
+        # 49 <pid> <seq> + at least one data byte
+        if len(payload) < 4:
+            raise ProtocolError(
+                "Mode 09 fragment too short: "
+                + " ".join(f"{b:02X}" for b in payload)
+            )
+        seq, data = payload[2], bytes(payload[3:])
+        if seq in fragments:
+            if fragments[seq] != data:
+                raise ProtocolError(f"conflicting Mode 09 fragment {seq}")
+            continue  # exact duplicate: a retransmission, already have it
+        fragments[seq] = data
+    if not fragments:
+        raise ProtocolError("no Mode 09 fragments")
+    if len(fragments) > max_frames:
+        raise ProtocolError(
+            f"Mode 09 response exceeded {max_frames} fragments"
+        )
+    order = sorted(fragments)
+    if order != list(range(1, len(order) + 1)):
+        expected = set(range(1, max(order) + 1))
+        missing = ", ".join(str(n) for n in sorted(expected - set(order)))
+        raise ProtocolError(
+            f"incomplete Mode 09 response: fragment(s) {missing or '?'} missing"
+        )
+    return b"".join(fragments[seq] for seq in order)
 
 
 @dataclass
