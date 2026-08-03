@@ -25,7 +25,7 @@ well-maintained libraries (see `pyproject.toml`): `textual` (TUI), `rich`
 Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 ```bash
-./.venv/bin/python -m pytest              # full suite (197 tests, ~75s, no hardware)
+./.venv/bin/python -m pytest              # full suite (206 tests, ~85s, no hardware)
 ./.venv/bin/python -m pytest tests/test_iso9141_obd.py::test_obd_read_decode_clear_cycle
 ./.venv/bin/trecu --mock                  # the default command is `tui`: TUI vs a simulated ECU
 ./.venv/bin/trecu faults --mock           # headless read + print + exit
@@ -38,9 +38,26 @@ Python is a mise-managed 3.11 in `.venv`. Always drive the venv explicitly:
 
 The CLI is a **subcommand** surface (`cli.py:27-86`), not a flag soup: one
 optional positional out of `tui|ports|faults|info|sensors|pids|clear|version|help`,
-defaulting to `tui`. `--port`, `--baud`, and `--mock` are
-`argparse.SUPPRESS`-hidden development hooks — the public surface auto-detects
-the cable.
+defaulting to `tui`. `--baud` and `--mock` are `argparse.SUPPRESS`-hidden
+development hooks; **`-p`/`--port` is public** — it is the only way to name a
+cable auto-detection can't pick (several FTDI devices, or an adapter that
+doesn't look like a KKL) and the only way to skip the TUI's picker. The
+**headless** subcommands auto-detect the cable when `--port` is absent
+(`_autodetect_port`: exactly one likely-KKL device, else `SystemExit` with
+guidance); the **TUI always opens its port picker** unless `--port` was passed
+— it has a UI to ask in, so it asks rather than guessing (`_cmd_tui`).
+
+**Every ECU subcommand announces its port before the first byte.**
+`_announce_port` resolves the device (`_resolve_port`: the mock label under
+`--mock`, else `--port` or auto-detection) and prints `Using port: …` **to
+stderr** — a diagnostic, not a result, so a piped table stays clean. It resolves
+**once**: the port it printed is passed down through `_with_service` into
+`_make_transport`, so auto-detection can't run again and open a different cable
+than the one announced. `clear` announces *before* its confirmation prompt (the
+one destructive command; the user confirms knowing which ECU it lands on) and
+hands the resolved port to `_with_service`, which is why that helper takes a
+`port=` at all. The TUI announces nothing here — the picker and the Connection
+card are where it names the port.
 
 Tests run **entirely against the in-memory mock ECU** — never require hardware,
 and any new test must follow suit. Use `--debug` on the CLI to dump raw byte

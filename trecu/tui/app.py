@@ -244,8 +244,9 @@ class TrecuApp(App):
             # so the worker's _populate can find #dtcs (mirrors _choose_port).
             self.call_after_refresh(self.action_read)
         else:
-            # No definite port yet — ask the user to choose one.
-            self._append_log("Multiple/no serial ports — choose one to begin.")
+            # No port fixed by the caller — the user picks one before anything
+            # touches the wire (every `trecu tui` without `--port` lands here).
+            self._append_log("Select the serial port for the cable to begin.")
             self._set_state("disconnected")
             self.call_after_refresh(self._choose_port)
 

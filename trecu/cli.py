@@ -16,6 +16,10 @@ from .transport.base import Transport, TransportError
 
 T = TypeVar("T")
 
+# What `--mock` reports where a real run reports a serial device. It is not a
+# port, and the announcement says so rather than inventing a plausible path.
+MOCK_PORT_LABEL = "mock ECU (no hardware)"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -23,7 +27,8 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
         usage=(
             "trecu [tui|ports|faults|info|sensors|pids|clear|version|help] "
-            "[--init-address INIT_ADDRESS] [--timeout TIMEOUT] [-y] [--debug]"
+            "[-p PORT] [--init-address INIT_ADDRESS] [--timeout TIMEOUT] "
+            "[-y] [--debug]"
         ),
         description="Read and decode Triumph motorcycle ECU fault codes over a "
         "KKL (FT232RL) K-line cable, using ISO 9141-2 / OBD-II.",
@@ -47,9 +52,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     conn = p.add_argument_group("connection")
-    # Kept as hidden development hooks. The public CLI auto-detects the serial
-    # port and uses the standard K-line baud rate.
-    conn.add_argument("-p", "--port", help=argparse.SUPPRESS)
+    # --port is public: it is the only way to name a cable the headless
+    # commands can't auto-detect (several FTDI devices plugged in, or an
+    # adapter that doesn't look like a KKL), and the only way to skip the TUI's
+    # port picker. `trecu ports` lists what to pass it.
+    conn.add_argument(
+        "-p",
+        "--port",
+        help="serial port of the K-line cable, e.g. /dev/cu.usbserial-3 "
+        "(default: auto-detect a single FTDI/KKL cable; `trecu tui` opens its "
+        "port picker instead). Run `trecu ports` to list them",
+    )
+    # Hidden development hooks: the standard K-line baud rate is not something
+    # to tune per bike, and --mock has no cable behind it at all.
     conn.add_argument("--baud", type=int, default=10400, help=argparse.SUPPRESS)
     conn.add_argument("--mock", action="store_true", help=argparse.SUPPRESS)
     # Both default to None rather than to a value: unset means "leave
@@ -82,7 +97,17 @@ def _make_config(args: argparse.Namespace) -> Iso9141Config:
     return iso
 
 
-def _make_transport(args: argparse.Namespace, config: Iso9141Config) -> Transport:
+def _make_transport(
+    args: argparse.Namespace,
+    config: Iso9141Config,
+    port: Optional[str] = None,
+) -> Transport:
+    """Build this run's device, on ``port`` when the caller already resolved it.
+
+    ``_with_service`` resolves and announces the port before anything opens it,
+    and passes it here so auto-detection can't run a second time and land on a
+    different cable than the one just printed.
+    """
     if args.mock:
         # Seed the simulated ECU with a random, type-varied set of real DB codes
         # so `--mock` shows a plausible spread of faults, not one canned code.
@@ -96,8 +121,34 @@ def _make_transport(args: argparse.Namespace, config: Iso9141Config) -> Transpor
         )
     from .transport.serial_kline import KLineSerialTransport
 
-    port = args.port or _autodetect_port()
-    return KLineSerialTransport(port=port, baudrate=args.baud)
+    return KLineSerialTransport(
+        port=port or _resolve_port(args), baudrate=args.baud
+    )
+
+
+def _resolve_port(args: argparse.Namespace) -> str:
+    """Name the device this run will talk to, without opening it.
+
+    ``--mock`` has no cable behind it, so it names the simulated ECU instead —
+    the announcement must never imply a serial port that isn't being used.
+    """
+    if args.mock:
+        return MOCK_PORT_LABEL
+    return args.port or _autodetect_port()
+
+
+def _announce_port(args: argparse.Namespace) -> str:
+    """Print the port about to be used, and return it.
+
+    Every ECU subcommand says which device it is about to talk to *before* the
+    first byte: with auto-detection the choice is otherwise invisible, and the
+    first question about a timeout or a garbled read is always "which cable was
+    that?". It goes to stderr with the other diagnostics so piping a result
+    table into another tool stays clean.
+    """
+    port = _resolve_port(args)
+    _stderr(f"Using port: {port}")
+    return port
 
 
 def _autodetect_port() -> str:
@@ -153,19 +204,27 @@ def _with_service(
     args: argparse.Namespace,
     operation: Callable[[DiagnosticService], T],
     show: Callable[[T], None],
+    port: Optional[str] = None,
 ) -> int:
     """Run one ECU ``operation`` for ``args`` and print it with ``show``.
 
     The four ECU subcommands differ only in those two callables; everything
-    around them — the config, the transport built from that same config, the
-    one-shot ``with service:`` lifecycle, and mapping a transport/protocol
-    failure onto exit code 2 — is identical, and is here so it can only drift
-    in one place. ``show`` runs after the session closes: printing is not an
-    ECU operation, and a formatting bug should not read as a connection error.
+    around them — announcing the port, the config, the transport built from
+    that same config and port, the one-shot ``with service:`` lifecycle, and
+    mapping a transport/protocol failure onto exit code 2 — is identical, and
+    is here so it can only drift in one place. ``show`` runs after the session
+    closes: printing is not an ECU operation, and a formatting bug should not
+    read as a connection error.
+
+    ``port`` is for a caller that already resolved *and* announced one (``clear``
+    names it in its confirmation prompt), so it is neither re-detected nor
+    printed twice.
     """
     config = _make_config(args)
+    if port is None:
+        port = _announce_port(args)
     service = DiagnosticService(
-        _make_transport(args, config),
+        _make_transport(args, config, port),
         config,
         logger=_stderr,
         verbose=args.debug,
@@ -303,12 +362,17 @@ def _cmd_pids(args: argparse.Namespace) -> int:
 
 
 def _cmd_clear(args: argparse.Namespace) -> int:
+    # Announce the port before the prompt, not after it: clearing is the one
+    # destructive operation, so the user confirms knowing which ECU it lands on.
+    port = _announce_port(args)
     if not args.yes:
         reply = input("Clear all stored fault codes? [y/N] ").strip().lower()
         if reply not in ("y", "yes"):
             print("Aborted.")
             return 1
-    return _with_service(args, DiagnosticService.clear_faults, _print_cleared)
+    return _with_service(
+        args, DiagnosticService.clear_faults, _print_cleared, port=port
+    )
 
 
 def _cmd_tui(args: argparse.Namespace) -> int:
@@ -340,19 +404,19 @@ def _cmd_tui(args: argparse.Namespace) -> int:
     baud = args.baud
     transport_for_port = lambda port: KLineSerialTransport(port, baud)  # noqa: E731
 
-    # An explicit port or a single obvious FTDI cable connects immediately.
-    # With multiple/no candidates, the TUI presents its port picker.
-    chosen: Optional[str] = args.port
-    if chosen is None:
-        candidates = [p for p in list_serial_ports() if p["likely_kkl"]]
-        if len(candidates) == 1:
-            chosen = candidates[0]["device"]
-
-    if chosen is not None:
+    # `--port` is the *only* way to skip the picker. The TUI used to auto-select
+    # a single likely-KKL cable and start talking to it, which silently guessed
+    # the one thing the user may need to control — a second FTDI device, or an
+    # adapter that doesn't look like a KKL, made that guess wrong with no way to
+    # see or change it. The picker already sorts likely cables first and
+    # pre-selects the top row, so the common case is still one keypress, and the
+    # headless subcommands keep auto-detecting (they have no UI to ask in).
+    port: Optional[str] = args.port
+    if port is not None:
         app = TrecuApp(
-            transport_factory=lambda: transport_for_port(chosen),
+            transport_factory=lambda: transport_for_port(port),
             mock=False,
-            port=chosen,
+            port=port,
             **common,
         )
     else:

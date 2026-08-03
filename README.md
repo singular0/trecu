@@ -121,15 +121,27 @@ trecu pids                 # print which PIDs the ECU supports, and which TrECU 
 trecu clear                # clear stored fault codes (asks first)
 trecu clear -y             # clear without prompting
 trecu faults --debug       # include raw protocol traffic
+trecu faults -p /dev/cu.usbserial-3   # name the cable instead of auto-detecting
 trecu version
 trecu help
 ```
 
-Diagnostic commands auto-select the cable when exactly one FTDI/KKL device is
-present. Use `--init-address` and `--timeout` to override connection parameters.
+The headless diagnostic commands auto-select the cable when exactly one
+FTDI/KKL device is present. Pass `-p`/`--port` to name one yourself — needed
+when several FTDI devices are plugged in, or when the adapter doesn't look like
+a KKL cable; `trecu ports` lists what to pass. Use `--init-address` and
+`--timeout` to override connection parameters.
 
-When `trecu tui` cannot auto-select a single cable, it opens the port picker.
-Inside the UI, use `r` to read faults, `c` to clear them, `←`/`→` to switch
+Each of them prints the port it is about to use (`Using port: …`) before
+connecting, so an auto-selected cable is never a silent choice — `clear` prints
+it before asking to confirm. That line goes to stderr along with the rest of
+the diagnostics, leaving stdout for results alone (`trecu faults 2>/dev/null`
+is just the table).
+
+`trecu tui` always opens the port picker at startup, even when only one cable
+is plugged in — likely cables are listed first with the top one pre-selected,
+so Enter connects. Passing `--port` skips the picker and connects to that
+cable. Inside the UI, use `r` to read faults, `c` to clear them, `←`/`→` to switch
 tabs, `space` to freeze live data, and `q` to quit. The Log tab follows the
 newest line while it is scrolled to the bottom; scroll up to read back and it
 stays put until you return to the bottom.
